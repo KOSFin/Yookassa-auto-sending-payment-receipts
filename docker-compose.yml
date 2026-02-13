@@ -43,8 +43,8 @@ services:
   proxy:
     image: nginx:1.27-alpine
     restart: unless-stopped
-    ports:
-      - "90:80"
+    expose:
+      - "80"
     volumes:
       - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
       - ./deploy/nginx/certs:/etc/nginx/certs:ro
