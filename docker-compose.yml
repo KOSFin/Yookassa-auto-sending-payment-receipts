@@ -51,8 +51,6 @@ services:
     restart: unless-stopped
     expose:
       - "80"
-    ports:
-      - "80:80"
     volumes:
       - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
       - ./deploy/nginx/certs:/etc/nginx/certs:ro
