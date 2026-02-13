@@ -44,7 +44,7 @@ services:
     image: nginx:1.27-alpine
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "90:80"
       - "443:443"
     volumes:
       - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
