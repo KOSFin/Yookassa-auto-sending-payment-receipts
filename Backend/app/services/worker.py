@@ -63,7 +63,12 @@ async def process_one_task() -> None:
                 amount_raw = context.get('amount', 0)
                 amount = float(amount_raw or 0)
 
-                receipt_result = await client.create_receipt(description=description, amount=amount, payment_id=task.payment_id)
+                receipt_result = await client.create_receipt(
+                    description=description,
+                    amount=amount,
+                    payment_id=task.payment_id,
+                    event_payload=payment_event.payload,
+                )
                 receipt = Receipt(
                     store_id=store.id,
                     task_id=task.id,

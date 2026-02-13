@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 import httpx
 
@@ -22,6 +23,21 @@ class MyTaxReceiptResult:
     receipt_uuid: str
     receipt_url: str
     raw: dict
+
+
+def _resolve_income_payment_type(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return 'WIRE'
+    object_payload = payload.get('object')
+    if not isinstance(object_payload, dict):
+        return 'WIRE'
+    payment_method = object_payload.get('payment_method')
+    method_type = None
+    if isinstance(payment_method, dict):
+        method_type = payment_method.get('type')
+    if isinstance(method_type, str) and method_type.lower() == 'cash':
+        return 'CASH'
+    return 'WIRE'
 
 
 class MyTaxClient:
@@ -54,7 +70,13 @@ class MyTaxClient:
         if not self.profile.is_authenticated:
             raise MyTaxAuthError('Профиль не аутентифицирован')
 
-    async def create_receipt(self, description: str, amount: float, payment_id: str) -> MyTaxReceiptResult:
+    async def create_receipt(
+        self,
+        description: str,
+        amount: float,
+        payment_id: str,
+        event_payload: dict[str, Any] | None = None,
+    ) -> MyTaxReceiptResult:
         raise NotImplementedError
 
     async def cancel_receipt(self, receipt_uuid: str) -> dict:
@@ -80,9 +102,16 @@ class UnofficialMyTaxClient(MyTaxClient):
             headers['Device-Id'] = self.profile.device_id
         return headers
 
-    async def create_receipt(self, description: str, amount: float, payment_id: str) -> MyTaxReceiptResult:
+    async def create_receipt(
+        self,
+        description: str,
+        amount: float,
+        payment_id: str,
+        event_payload: dict[str, Any] | None = None,
+    ) -> MyTaxReceiptResult:
         await self.ensure_authenticated()
         operation_time = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+        payment_type = _resolve_income_payment_type(event_payload)
         payload = {
             'operationTime': operation_time,
             'requestTime': operation_time,
@@ -93,7 +122,7 @@ class UnofficialMyTaxClient(MyTaxClient):
                     'quantity': 1,
                 }
             ],
-            'paymentType': 'CASHLESS',
+            'paymentType': payment_type,
             'ignoreMaxTotalIncomeRestriction': True,
             'client': {'displayName': ''},
             'externalIncomeId': payment_id,
@@ -119,7 +148,13 @@ class OfficialMyTaxClient(MyTaxClient):
     def _headers(self) -> dict:
         return {'Authorization': f'Bearer {self.profile.access_token}', 'Content-Type': 'application/json'}
 
-    async def create_receipt(self, description: str, amount: float, payment_id: str) -> MyTaxReceiptResult:
+    async def create_receipt(
+        self,
+        description: str,
+        amount: float,
+        payment_id: str,
+        event_payload: dict[str, Any] | None = None,
+    ) -> MyTaxReceiptResult:
         await self.ensure_authenticated()
         if not settings.proxy_base_url:
             raise MyTaxApiError('Для official API требуется настроить endpoint в интеграции')
