@@ -2,6 +2,8 @@ services:
   postgres:
     image: postgres:16
     restart: unless-stopped
+    networks:
+      - appnet
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-yookassa_auto}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
