@@ -13,6 +13,8 @@ services:
     build:
       context: ./Backend
     restart: unless-stopped
+    networks:
+      - appnet
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-yookassa_auto}
       APP_ENV: ${APP_ENV:-production}
@@ -34,23 +36,34 @@ services:
       RUN_EMBEDDED_WORKER: true
     depends_on:
       - postgres
+    networks:
+      - appnet
 
   frontend:
     build:
       context: ./Frontend
     restart: unless-stopped
+    networks:
+      - appnet
 
   proxy:
     image: nginx:1.27-alpine
     restart: unless-stopped
     expose:
       - "80"
+    ports:
+      - "80:80"
     volumes:
       - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
       - ./deploy/nginx/certs:/etc/nginx/certs:ro
     depends_on:
       - backend
       - frontend
+    networks:
+      - appnet
 
 volumes:
   postgres_data:
+
+networks:
+  appnet:
