@@ -149,14 +149,38 @@ async def login_profile(profile_id: int, payload: LoginProfileIn, db: AsyncSessi
     item = await db.get(MyTaxProfile, profile_id)
     if item is None:
         raise HTTPException(status_code=404, detail='Profile not found')
+    released_tasks = 0
     if payload.force or item.inn:
         item.is_authenticated = True
         item.last_error = ''
         item.last_auth_at = datetime.now(UTC).replace(tzinfo=None)
+
+        stores_res = await db.execute(select(Store.id).where(Store.mytax_profile_id == item.id))
+        store_ids = [store_id for (store_id,) in stores_res.all()]
+        if store_ids:
+            queued_tasks_res = await db.execute(
+                select(ReceiptTask).where(
+                    ReceiptTask.store_id.in_(store_ids),
+                    ReceiptTask.status == TaskStatus.WAITING_AUTH,
+                )
+            )
+            queued_tasks = list(queued_tasks_res.scalars().all())
+            for task in queued_tasks:
+                task.status = TaskStatus.PENDING
+                task.error_message = ''
+                task.next_retry_at = datetime.utcnow()
+            released_tasks = len(queued_tasks)
     else:
         item.is_authenticated = False
         item.last_error = 'Недостаточно данных для авторизации'
+
     await _create_log(db, 'mytax_profile_login', f'Обновлен статус авторизации: {item.name}')
+    if released_tasks:
+        await _create_log(
+            db,
+            'queue_resume_after_auth',
+            f'Возобновлено задач после авторизации: {released_tasks}',
+        )
     await db.commit()
     await db.refresh(item)
     return item
