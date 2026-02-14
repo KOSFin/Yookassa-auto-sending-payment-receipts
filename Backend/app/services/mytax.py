@@ -18,7 +18,18 @@ class MyTaxAuthError(Exception):
 
 
 class MyTaxApiError(Exception):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        response_text: str = '',
+        payload: dict[str, Any] | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_text = response_text
+        self.payload = payload or {}
 
 
 @dataclass
@@ -166,7 +177,19 @@ class MyTaxClient:
             if response.status_code in {401, 403}:
                 raise MyTaxAuthError('Ошибка авторизации в Мой Налог, требуется повторный вход')
             if response.status_code >= 400:
-                raise MyTaxApiError(f'MyTax API error {response.status_code}: {response.text}')
+                parsed_payload: dict[str, Any] | None = None
+                try:
+                    candidate = response.json()
+                    if isinstance(candidate, dict):
+                        parsed_payload = candidate
+                except ValueError:
+                    parsed_payload = None
+                raise MyTaxApiError(
+                    f'MyTax API error {response.status_code}: {response.text}',
+                    status_code=response.status_code,
+                    response_text=response.text,
+                    payload=parsed_payload,
+                )
             if response.content:
                 content_type = response.headers.get('Content-Type', '')
                 if 'application/json' in content_type.lower():
@@ -309,22 +332,14 @@ class UnofficialMyTaxClient(MyTaxClient):
             'challengeToken': challenge_token,
             'deviceInfo': self._device_info(),
         }
-        endpoints = ('/api/v1/auth/challenge/sms/verify', '/api/v2/auth/challenge/sms/verify')
-        last_error: Exception | None = None
-        for endpoint in endpoints:
-            try:
-                token_payload = await self._request(
-                    'POST',
-                    f'{self.base_url}{endpoint}',
-                    json_payload=payload,
-                    headers={'Content-Type': 'application/json', 'Referrer': 'https://lknpd.nalog.ru/auth/login'},
-                )
-                if isinstance(token_payload, dict):
-                    return token_payload
-            except Exception as exc:
-                last_error = exc
-        if last_error is not None:
-            raise last_error
+        token_payload = await self._request(
+            'POST',
+            f'{self.base_url}/api/v1/auth/challenge/sms/verify',
+            json_payload=payload,
+            headers={'Content-Type': 'application/json', 'Referrer': 'https://lknpd.nalog.ru/auth/login'},
+        )
+        if isinstance(token_payload, dict):
+            return token_payload
         raise MyTaxApiError('Не удалось подтвердить SMS-код: неожиданный формат ответа')
 
     async def create_receipt(

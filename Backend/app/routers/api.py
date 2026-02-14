@@ -136,6 +136,23 @@ def _profile_auth_context(item: MyTaxProfile) -> dict:
     }
 
 
+def _mytax_error_detail(exc: Exception) -> dict:
+    if isinstance(exc, MyTaxApiError):
+        payload = exc.payload if isinstance(exc.payload, dict) else {}
+        code = str(payload.get('code') or '')
+        message = str(payload.get('message') or str(exc))
+        additional_info = payload.get('additionalInfo')
+        detail: dict[str, object] = {'message': message}
+        if code:
+            detail['code'] = code
+        if isinstance(additional_info, dict) and additional_info:
+            detail['additionalInfo'] = additional_info
+        if exc.status_code is not None:
+            detail['status'] = exc.status_code
+        return detail
+    return {'message': str(exc)}
+
+
 async def _release_waiting_auth_tasks(db: AsyncSession, profile_id: int) -> int:
     stores_res = await db.execute(select(Store.id).where(Store.mytax_profile_id == profile_id))
     store_ids = [store_id for (store_id,) in stores_res.all()]
@@ -441,15 +458,27 @@ async def start_profile_phone_auth(
         return {'status': 'ok', 'phone': phone, **result}
     except Exception as exc:
         item.last_error = str(exc)
+        detail = _mytax_error_detail(exc)
         await _create_log(
             db,
             'mytax_phone_challenge_failed',
             f'Не удалось запросить SMS challenge для профиля {item.name}: {exc}',
             level='error',
-            context={**_profile_auth_context(item), 'phone': phone, 'error': str(exc)},
+            context={**_profile_auth_context(item), 'phone': phone, 'error': str(exc), 'detail': detail},
         )
         await db.commit()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        code = str(detail.get('code') or '')
+        if code == 'registration.sms.verification.not.expired':
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    **detail,
+                    'phone': phone,
+                    'can_verify': True,
+                    'action': 'use_existing_challenge',
+                },
+            ) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
 
 
 @router.post('/profiles/{profile_id}/auth/phone/verify', response_model=MyTaxProfileOut)
@@ -496,15 +525,16 @@ async def verify_profile_phone_auth(
     except Exception as exc:
         item.is_authenticated = False
         item.last_error = str(exc)
+        detail = _mytax_error_detail(exc)
         await _create_log(
             db,
             'mytax_phone_auth_failed',
             f'Ошибка подтверждения SMS-кода для профиля {item.name}: {exc}',
             level='error',
-            context={**_profile_auth_context(item), 'phone': phone, 'error': str(exc)},
+            context={**_profile_auth_context(item), 'phone': phone, 'error': str(exc), 'detail': detail},
         )
         await db.commit()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
 
 
 @router.get('/profiles/{profile_id}/logs', response_model=list[AppLogOut])

@@ -52,6 +52,17 @@ async function api(path, options = {}) {
   return response.json()
 }
 
+function parseApiErrorPayload(error) {
+  if (!(error instanceof Error)) return null
+  const raw = (error.message || '').trim()
+  if (!raw) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
 function formatErrorMessage(error) {
   if (!(error instanceof Error)) {
     return 'Неизвестная ошибка'
@@ -276,6 +287,17 @@ function App() {
       })
       await loadAll()
     } catch (err) {
+      const payload = parseApiErrorPayload(err)
+      const detail = payload?.detail
+      if (detail && typeof detail === 'object' && detail.can_verify) {
+        setPhoneAuthForm((prev) => ({
+          profile_id: String(profile.id),
+          phone: String(detail.phone || profile.phone || ''),
+          challenge_token: String(detail.additionalInfo?.challengeToken || prev.challenge_token || ''),
+          code: '',
+          expire_date: String(detail.additionalInfo?.expireDate || prev.expire_date || ''),
+        }))
+      }
       setError(formatErrorMessage(err))
     }
   }
