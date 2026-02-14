@@ -22,14 +22,16 @@ AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=As
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
-    async with AsyncSessionLocal() as session:
+    session: AsyncSession | None = None
+    try:
+        session = AsyncSessionLocal()
         try:
             await session.execute(text('SELECT 1'))
-            yield session
-            return
         except Exception:
             await session.close()
-
-    async with AsyncSessionLocal() as retry_session:
-        await retry_session.execute(text('SELECT 1'))
-        yield retry_session
+            session = AsyncSessionLocal()
+            await session.execute(text('SELECT 1'))
+        yield session
+    finally:
+        if session is not None:
+            await session.close()

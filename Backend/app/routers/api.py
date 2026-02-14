@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Select, and_, func, select
@@ -86,7 +87,7 @@ def _sanitize_profile_payload(payload: MyTaxProfileCreate) -> dict:
     data = payload.model_dump()
     data['inn'] = (data.get('inn') or '').strip() or None
     data['password'] = (data.get('password') or '').strip() or None
-    data['phone'] = (data.get('phone') or '').strip() or None
+    data['phone'] = _normalize_phone((data.get('phone') or '').strip())
     data['device_id'] = (data.get('device_id') or '').strip() or None
 
     raw_access_token = (data.get('access_token') or '').strip()
@@ -98,6 +99,25 @@ def _sanitize_profile_payload(payload: MyTaxProfileCreate) -> dict:
     data['refresh_token'] = normalized_refresh_token
     data['cookie_blob'] = normalize_cookie_blob(data.get('cookie_blob'))
     return data
+
+
+def _normalize_phone(raw: str | None) -> str | None:
+    value = (raw or '').strip()
+    if not value:
+        return None
+    digits = re.sub(r'\D', '', value)
+    if len(digits) == 10:
+        digits = f'7{digits}'
+    return digits or None
+
+
+def _require_valid_phone(raw: str | None) -> str:
+    phone = _normalize_phone(raw)
+    if not phone:
+        raise HTTPException(status_code=400, detail='Phone is required')
+    if len(phone) != 11 or not phone.isdigit():
+        raise HTTPException(status_code=400, detail='Номер телефона должен содержать 11 цифр')
+    return phone
 
 
 def _profile_auth_context(item: MyTaxProfile) -> dict:
@@ -399,9 +419,7 @@ async def start_profile_phone_auth(
     if str(item.provider) != 'unofficial_api':
         raise HTTPException(status_code=400, detail='Phone auth is supported only for unofficial_api')
 
-    phone = (payload.phone or item.phone or '').strip()
-    if not phone:
-        raise HTTPException(status_code=400, detail='Phone is required')
+    phone = _require_valid_phone(payload.phone or item.phone)
 
     client = UnofficialMyTaxClient(item)
     try:
@@ -446,9 +464,7 @@ async def verify_profile_phone_auth(
     if str(item.provider) != 'unofficial_api':
         raise HTTPException(status_code=400, detail='Phone auth is supported only for unofficial_api')
 
-    phone = (payload.phone or item.phone or '').strip()
-    if not phone:
-        raise HTTPException(status_code=400, detail='Phone is required')
+    phone = _require_valid_phone(payload.phone or item.phone)
 
     client = UnofficialMyTaxClient(item)
     try:
