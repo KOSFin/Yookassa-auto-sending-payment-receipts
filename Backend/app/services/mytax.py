@@ -32,6 +32,10 @@ class MyTaxApiError(Exception):
         self.payload = payload or {}
 
 
+class MyTaxTransientError(MyTaxApiError):
+    pass
+
+
 @dataclass
 class MyTaxReceiptResult:
     receipt_uuid: str
@@ -184,8 +188,16 @@ class MyTaxClient:
                         parsed_payload = candidate
                 except ValueError:
                     parsed_payload = None
+                error_message = f'MyTax API error {response.status_code}: {response.text}'
+                if response.status_code >= 500 or response.status_code == 429:
+                    raise MyTaxTransientError(
+                        error_message,
+                        status_code=response.status_code,
+                        response_text=response.text,
+                        payload=parsed_payload,
+                    )
                 raise MyTaxApiError(
-                    f'MyTax API error {response.status_code}: {response.text}',
+                    error_message,
                     status_code=response.status_code,
                     response_text=response.text,
                     payload=parsed_payload,
@@ -204,7 +216,7 @@ class MyTaxClient:
         except MyTaxAuthError:
             raise
         except httpx.HTTPError as exc:
-            raise MyTaxApiError(f'Ошибка HTTP запроса в Мой Налог: {exc}') from exc
+            raise MyTaxTransientError(f'Ошибка HTTP запроса в Мой Налог: {exc}') from exc
 
     async def ensure_authenticated(self) -> None:
         if not self.profile.is_authenticated:

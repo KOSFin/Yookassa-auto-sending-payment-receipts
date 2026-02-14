@@ -20,7 +20,7 @@ from app.models import (
     TaskStatus,
     TaskType,
 )
-from app.services.mytax import MyTaxAuthError, build_mytax_client
+from app.services.mytax import MyTaxAuthError, MyTaxTransientError, build_mytax_client
 from app.services.relay import relay_notification
 from app.services.telegram import notify_store
 from app.services.template import build_context, render_template
@@ -217,6 +217,34 @@ async def process_one_task() -> None:
                 store_id=task.store_id,
                 event_name='mytax_auth_required',
                 message=f'MyTax re-authentication required: {exc}',
+            )
+
+        except MyTaxTransientError as exc:
+            task.status = TaskStatus.PENDING
+            task.attempts = max(0, task.attempts - 1)
+            retry_seconds = min(1800, 30 + task.attempts * 30)
+            task.next_retry_at = datetime.utcnow() + timedelta(seconds=retry_seconds)
+            task.error_message = str(exc)
+            payment_event.status = EventStatus.RECEIVED
+            payment_event.error_message = str(exc)
+            await _create_worker_log(
+                db,
+                'worker_task_transient_retry',
+                f'Task #{task.id} transient MyTax error, retry scheduled: {exc}',
+                store_id=task.store_id,
+                level='warning',
+                context={
+                    'task_id': task.id,
+                    'payment_id': task.payment_id,
+                    'attempts': task.attempts,
+                    'retry_in_seconds': retry_seconds,
+                },
+            )
+            logger.warning(
+                'Task %s transient MyTax error, retry in %s sec: %s',
+                task.id,
+                retry_seconds,
+                exc,
             )
 
         except Exception as exc:
