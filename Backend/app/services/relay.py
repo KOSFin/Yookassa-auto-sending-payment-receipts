@@ -15,6 +15,7 @@ async def relay_notification(
     store: Store,
     payload: dict,
     receipt_url: str = '',
+    receipt_uuid: str = '',
 ) -> str:
     query = select(RelayTarget).where(RelayTarget.store_id == store.id, RelayTarget.is_active.is_(True))
     result = await db.execute(query)
@@ -27,8 +28,11 @@ async def relay_notification(
     async with httpx.AsyncClient(timeout=15) as client:
         for target in targets:
             body = payload.copy()
-            if store.include_receipt_url_in_relay and receipt_url:
-                body['generated_receipt_url'] = receipt_url
+            if store.include_receipt_url_in_relay:
+                if receipt_url:
+                    body['generated_receipt_url'] = receipt_url
+                if receipt_uuid:
+                    body['generated_receipt_uuid'] = receipt_uuid
 
             if target.payload_template:
                 rendered = render_template(target.payload_template, {'payload': body, **body})

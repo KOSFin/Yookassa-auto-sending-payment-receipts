@@ -176,6 +176,14 @@ def _normalize_amount_string(value: float | str | int) -> str:
     return str(normalized)
 
 
+def _normalize_inn(value: str | None) -> str:
+    raw = (value or '').strip()
+    digits = ''.join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 12:
+        return digits
+    return ''
+
+
 class MyTaxClient:
     def __init__(self, profile: MyTaxProfile):
         self.profile = profile
@@ -249,6 +257,12 @@ class MyTaxClient:
 
 class UnofficialMyTaxClient(MyTaxClient):
     base_url = 'https://lknpd.nalog.ru'
+
+    def _build_receipt_url(self, receipt_uuid: str) -> str:
+        normalized_inn = _normalize_inn(self.profile.inn)
+        if normalized_inn and receipt_uuid:
+            return f'{self.base_url}/api/v1/receipt/{normalized_inn}/{receipt_uuid}/print'
+        return f'{self.base_url}/web/receipts/{receipt_uuid}'
 
     def _resolved_device_id(self) -> str:
         if self.profile.device_id and self.profile.device_id.strip():
@@ -383,13 +397,18 @@ class UnofficialMyTaxClient(MyTaxClient):
             'services': [
                 {
                     'name': description[:128],
-                    'amount': amount_value,
+                    'amount': float(amount_value),
                     'quantity': 1,
                 }
             ],
             'paymentType': payment_type,
-            'ignoreMaxTotalIncomeRestriction': True,
-            'client': {'displayName': ''},
+            'ignoreMaxTotalIncomeRestriction': False,
+            'client': {
+                'contactPhone': None,
+                'displayName': None,
+                'inn': None,
+                'incomeType': 'FROM_INDIVIDUAL',
+            },
             'externalIncomeId': payment_id,
             'totalAmount': amount_value,
         }
@@ -400,7 +419,7 @@ class UnofficialMyTaxClient(MyTaxClient):
             raw = {'raw': response}
 
         receipt_uuid = str(raw.get('approvedReceiptUuid') or raw.get('receiptUuid') or raw.get('id') or payment_id)
-        receipt_url = str(raw.get('receiptUrl') or f'{self.base_url}/web/receipts/{receipt_uuid}')
+    receipt_url = str(raw.get('receiptUrl') or self._build_receipt_url(receipt_uuid))
         return MyTaxReceiptResult(receipt_uuid=receipt_uuid, receipt_url=receipt_url, raw=raw)
 
     async def cancel_receipt(self, receipt_uuid: str) -> dict:

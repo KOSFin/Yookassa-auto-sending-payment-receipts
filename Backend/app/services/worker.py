@@ -138,7 +138,13 @@ async def process_one_task() -> None:
                 )
                 db.add(receipt)
 
-                payment_event.relay_status = await relay_notification(db, store, payment_event.payload, receipt_result.receipt_url)
+                payment_event.relay_status = await relay_notification(
+                    db,
+                    store,
+                    payment_event.payload,
+                    receipt_result.receipt_url,
+                    receipt_result.receipt_uuid,
+                )
 
                 await notify_store(
                     db,
