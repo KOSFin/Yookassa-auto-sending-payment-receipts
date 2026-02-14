@@ -352,13 +352,14 @@ class UnofficialMyTaxClient(MyTaxClient):
         await self.ensure_authenticated()
         operation_time = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
         payment_type = _resolve_income_payment_type(event_payload)
-        payload = {
+        amount_value = float(amount)
+        base_payload = {
             'operationTime': operation_time,
             'requestTime': operation_time,
             'services': [
                 {
                     'name': description[:128],
-                    'amount': float(amount),
+                    'amount': amount_value,
                     'quantity': 1,
                 }
             ],
@@ -367,7 +368,36 @@ class UnofficialMyTaxClient(MyTaxClient):
             'client': {'displayName': ''},
             'externalIncomeId': payment_id,
         }
-        raw = await self._request('POST', f'{self.base_url}/api/v1/income', json_payload=payload, headers=self._headers())
+
+        payload_variants = [
+            {**base_payload, 'totalAmount': amount_value},
+            {**base_payload, 'totalIncomeAmount': amount_value},
+            {**base_payload, 'total_amount': amount_value},
+        ]
+
+        last_error: Exception | None = None
+        raw: dict[str, Any] | None = None
+        for payload in payload_variants:
+            try:
+                response = await self._request('POST', f'{self.base_url}/api/v1/income', json_payload=payload, headers=self._headers())
+                if isinstance(response, dict):
+                    raw = response
+                    break
+                raw = {'raw': response}
+                break
+            except MyTaxApiError as exc:
+                code = str((exc.payload or {}).get('code') or '')
+                message = str((exc.payload or {}).get('message') or str(exc)).lower()
+                if code == 'validation.failed' and 'общая сумма дохода' in message:
+                    last_error = exc
+                    continue
+                raise
+
+        if raw is None:
+            if last_error is not None:
+                raise last_error
+            raise MyTaxApiError('Не удалось сформировать чек: неожиданный формат ответа')
+
         receipt_uuid = str(raw.get('approvedReceiptUuid') or raw.get('receiptUuid') or raw.get('id') or payment_id)
         receipt_url = str(raw.get('receiptUrl') or f'{self.base_url}/web/receipts/{receipt_uuid}')
         return MyTaxReceiptResult(receipt_uuid=receipt_uuid, receipt_url=receipt_url, raw=raw)
