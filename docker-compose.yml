@@ -94,3 +94,6 @@ services:
 
 volumes:
   postgres_data:
+
+networks:
+  appnet:
