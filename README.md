@@ -127,6 +127,12 @@ RUN_EMBEDDED_WORKER=false
 docker compose up -d --build
 ```
 
+Для автодеплоя (без ручной чистки контейнеров) используйте:
+
+```bash
+docker compose up -d --build --force-recreate --remove-orphans
+```
+
 Если `proxy` иногда зависает после предыдущих запусков, используйте автоматический скрипт (Windows PowerShell):
 
 ```powershell
@@ -146,7 +152,7 @@ docker compose up -d --build
 
 Проект уже готов к доменному сценарию:
 
-- контейнер `proxy` публикует `80` и `443`;
+- контейнер `proxy` публикует `80` (порт можно переопределить через `PROXY_HTTP_PORT`);
 - пользователь привязывает DNS домен к IP сервера;
 - SSL можно выпускать внешним способом (например, certbot) и монтировать сертификаты в `deploy/nginx/certs`.
 
