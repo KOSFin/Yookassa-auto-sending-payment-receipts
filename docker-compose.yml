@@ -26,6 +26,12 @@ services:
       RUN_EMBEDDED_WORKER: ${RUN_EMBEDDED_WORKER:-false}
     depends_on:
       - postgres
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
   worker:
     build:
@@ -57,8 +63,10 @@ services:
       - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
       - ./deploy/nginx/certs:/etc/nginx/certs:ro
     depends_on:
-      - backend
-      - frontend
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
     networks:
       - appnet
 
