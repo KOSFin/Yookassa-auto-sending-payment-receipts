@@ -161,6 +161,13 @@ https://your-domain.tld/webhook/<store_path>
 
 Если доступ протухнет, задачи автоматически переходят в `WAITING_AUTH` и не теряются.
 
+Дополнительно доступно в панели:
+
+- проверка действительности текущей сессии (`auth check`) через API `lknpd`;
+- вход по телефону в 2 шага: `SMS challenge` → подтверждение кода;
+- редактирование и удаление профилей;
+- расширенные auth-логи в отдельной вкладке `Логи` (включая `context`).
+
 ### 2) Магазин
 
 Для магазина задаются:
@@ -274,7 +281,11 @@ https://your-domain.tld/webhook/<store_path>
 - `GET /api/health`
 - `GET/POST/PUT/DELETE /api/stores`
 - `GET/POST/PUT /api/profiles`
+- `DELETE /api/profiles/{id}`
 - `POST /api/profiles/{id}/login`
+- `POST /api/profiles/{id}/auth/check`
+- `POST /api/profiles/{id}/auth/phone/start`
+- `POST /api/profiles/{id}/auth/phone/verify`
 - `GET/POST /api/relay-targets`
 - `GET/POST /api/telegram-channels`
 - `POST /api/webhook/{store_path}`

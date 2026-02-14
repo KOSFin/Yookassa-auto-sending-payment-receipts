@@ -97,6 +97,20 @@ async def process_one_task() -> None:
 
         try:
             client = build_mytax_client(store.mytax_profile)
+            await _create_worker_log(
+                db,
+                'worker_task_processing',
+                f'Task #{task.id} started ({task.task_type})',
+                store_id=task.store_id,
+                context={
+                    'task_id': task.id,
+                    'task_type': str(task.task_type),
+                    'profile_id': store.mytax_profile.id,
+                    'provider': str(store.mytax_profile.provider),
+                    'has_access_token': bool(store.mytax_profile.access_token),
+                    'has_cookie_blob': bool(store.mytax_profile.cookie_blob),
+                },
+            )
 
             if task.task_type == TaskType.CREATE_RECEIPT:
                 context = build_context(payment_event.payload, store)
@@ -187,7 +201,15 @@ async def process_one_task() -> None:
                 f'Task #{task.id} requires MyTax re-authentication',
                 store_id=task.store_id,
                 level='warning',
-                context={'task_id': task.id, 'payment_id': task.payment_id, 'error': str(exc)},
+                context={
+                    'task_id': task.id,
+                    'payment_id': task.payment_id,
+                    'error': str(exc),
+                    'profile_id': store.mytax_profile.id,
+                    'provider': str(store.mytax_profile.provider),
+                    'has_access_token': bool(store.mytax_profile.access_token),
+                    'has_cookie_blob': bool(store.mytax_profile.cookie_blob),
+                },
             )
             logger.warning('Task %s moved to waiting_auth: %s', task.id, exc)
             await notify_store(

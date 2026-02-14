@@ -94,6 +94,12 @@
   margin: 8px 0;
 }
 
+.actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 input,
 select,
 button {

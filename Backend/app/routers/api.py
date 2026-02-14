@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Select, and_, func, select
@@ -24,6 +25,9 @@ from app.schemas import (
     AppLogOut,
     LoginProfileIn,
     MyTaxProfileCreate,
+    ProfileAuthStatusOut,
+    ProfilePhoneChallengeIn,
+    ProfilePhoneVerifyIn,
     MyTaxProfileOut,
     PaymentEventOut,
     QueueRetryIn,
@@ -37,6 +41,13 @@ from app.schemas import (
     StoreUpdate,
     TelegramChannelCreate,
     TelegramChannelOut,
+)
+from app.services.mytax import (
+    MyTaxApiError,
+    UnofficialMyTaxClient,
+    extract_access_token,
+    extract_refresh_token,
+    normalize_cookie_blob,
 )
 from app.services.relay import relay_notification
 from app.services.telegram import notify_store
@@ -68,6 +79,43 @@ async def _create_log(
             context=context or {},
         )
     )
+
+
+def _sanitize_profile_payload(payload: MyTaxProfileCreate) -> dict:
+    data = payload.model_dump()
+    data['inn'] = (data.get('inn') or '').strip() or None
+    data['password'] = (data.get('password') or '').strip() or None
+    data['phone'] = (data.get('phone') or '').strip() or None
+    data['device_id'] = (data.get('device_id') or '').strip() or None
+
+    raw_access_token = (data.get('access_token') or '').strip()
+    raw_refresh_token = (data.get('refresh_token') or '').strip()
+    normalized_access_token = extract_access_token(raw_access_token)
+    normalized_refresh_token = extract_refresh_token(raw_access_token, raw_refresh_token)
+
+    data['access_token'] = normalized_access_token
+    data['refresh_token'] = normalized_refresh_token
+    data['cookie_blob'] = normalize_cookie_blob(data.get('cookie_blob'))
+    return data
+
+
+async def _release_waiting_auth_tasks(db: AsyncSession, profile_id: int) -> int:
+    stores_res = await db.execute(select(Store.id).where(Store.mytax_profile_id == profile_id))
+    store_ids = [store_id for (store_id,) in stores_res.all()]
+    if not store_ids:
+        return 0
+    queued_tasks_res = await db.execute(
+        select(ReceiptTask).where(
+            ReceiptTask.store_id.in_(store_ids),
+            ReceiptTask.status == TaskStatus.WAITING_AUTH,
+        )
+    )
+    queued_tasks = list(queued_tasks_res.scalars().all())
+    for task in queued_tasks:
+        task.status = TaskStatus.PENDING
+        task.error_message = ''
+        task.next_retry_at = datetime.utcnow()
+    return len(queued_tasks)
 
 
 @router.get('/health')
@@ -123,9 +171,14 @@ async def list_profiles(db: AsyncSession = Depends(get_db)) -> list[MyTaxProfile
 
 @router.post('/profiles', response_model=MyTaxProfileOut)
 async def create_profile(payload: MyTaxProfileCreate, db: AsyncSession = Depends(get_db)) -> MyTaxProfile:
-    item = MyTaxProfile(**payload.model_dump())
+    item = MyTaxProfile(**_sanitize_profile_payload(payload))
     db.add(item)
-    await _create_log(db, 'mytax_profile_created', f'Создан профиль: {item.name}')
+    await _create_log(
+        db,
+        'mytax_profile_created',
+        f'Создан профиль: {item.name}',
+        context={'profile_name': item.name, 'provider': item.provider},
+    )
     await db.commit()
     await db.refresh(item)
     return item
@@ -136,12 +189,41 @@ async def update_profile(profile_id: int, payload: MyTaxProfileCreate, db: Async
     item = await db.get(MyTaxProfile, profile_id)
     if item is None:
         raise HTTPException(status_code=404, detail='Profile not found')
-    for key, value in payload.model_dump().items():
+    for key, value in _sanitize_profile_payload(payload).items():
         setattr(item, key, value)
-    await _create_log(db, 'mytax_profile_updated', f'Обновлен профиль: {item.name}')
+    await _create_log(
+        db,
+        'mytax_profile_updated',
+        f'Обновлен профиль: {item.name}',
+        context={'profile_id': item.id, 'provider': item.provider},
+    )
+    item.is_authenticated = False
+    item.last_error = 'Профиль обновлён. Выполните проверку входа.'
     await db.commit()
     await db.refresh(item)
     return item
+
+
+@router.delete('/profiles/{profile_id}')
+async def delete_profile(profile_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    item = await db.get(MyTaxProfile, profile_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail='Profile not found')
+
+    stores_res = await db.execute(select(Store).where(Store.mytax_profile_id == profile_id))
+    stores = list(stores_res.scalars().all())
+    for store in stores:
+        store.mytax_profile_id = None
+
+    await db.delete(item)
+    await _create_log(
+        db,
+        'mytax_profile_deleted',
+        f'Удален профиль: {item.name}',
+        context={'profile_id': profile_id, 'affected_stores': len(stores)},
+    )
+    await db.commit()
+    return {'status': 'deleted'}
 
 
 @router.post('/profiles/{profile_id}/login', response_model=MyTaxProfileOut)
@@ -150,40 +232,228 @@ async def login_profile(profile_id: int, payload: LoginProfileIn, db: AsyncSessi
     if item is None:
         raise HTTPException(status_code=404, detail='Profile not found')
     released_tasks = 0
-    if payload.force or item.inn:
-        item.is_authenticated = True
-        item.last_error = ''
-        item.last_auth_at = datetime.now(UTC).replace(tzinfo=None)
+    await _create_log(
+        db,
+        'mytax_auth_check_started',
+        f'Запущена проверка авторизации профиля {item.name}',
+        context={'profile_id': item.id, 'provider': item.provider},
+    )
 
-        stores_res = await db.execute(select(Store.id).where(Store.mytax_profile_id == item.id))
-        store_ids = [store_id for (store_id,) in stores_res.all()]
-        if store_ids:
-            queued_tasks_res = await db.execute(
-                select(ReceiptTask).where(
-                    ReceiptTask.store_id.in_(store_ids),
-                    ReceiptTask.status == TaskStatus.WAITING_AUTH,
+    try:
+        if item.provider == 'unofficial_api':
+            client = UnofficialMyTaxClient(item)
+            has_token_or_cookie = bool(extract_access_token(item.access_token) or normalize_cookie_blob(item.cookie_blob))
+
+            if has_token_or_cookie:
+                probe_user = await client.probe_auth()
+                item.is_authenticated = True
+                item.last_error = ''
+                item.last_auth_at = datetime.now(UTC).replace(tzinfo=None)
+                await _create_log(
+                    db,
+                    'mytax_auth_check_success',
+                    f'Профиль {item.name} авторизован по access_token/cookie',
+                    context={'profile_id': item.id, 'user': probe_user},
                 )
-            )
-            queued_tasks = list(queued_tasks_res.scalars().all())
-            for task in queued_tasks:
-                task.status = TaskStatus.PENDING
-                task.error_message = ''
-                task.next_retry_at = datetime.utcnow()
-            released_tasks = len(queued_tasks)
-    else:
-        item.is_authenticated = False
-        item.last_error = 'Недостаточно данных для авторизации'
+            elif item.inn and item.password:
+                token_payload = await client.login_with_inn_password()
+                item.access_token = extract_access_token(json.dumps(token_payload, ensure_ascii=False))
+                item.refresh_token = extract_refresh_token(json.dumps(token_payload, ensure_ascii=False), item.refresh_token)
+                probe_user = await client.probe_auth()
+                item.is_authenticated = True
+                item.last_error = ''
+                item.last_auth_at = datetime.now(UTC).replace(tzinfo=None)
+                await _create_log(
+                    db,
+                    'mytax_auth_login_password_success',
+                    f'Профиль {item.name} авторизован по ИНН/паролю',
+                    context={'profile_id': item.id, 'user': probe_user},
+                )
+            elif payload.force:
+                raise MyTaxApiError('Недостаточно данных для проверки. Нужны cookie/access_token или ИНН+пароль')
+            else:
+                raise MyTaxApiError('Недостаточно данных для проверки. Нужны cookie/access_token или ИНН+пароль')
 
-    await _create_log(db, 'mytax_profile_login', f'Обновлен статус авторизации: {item.name}')
+        else:
+            if item.access_token:
+                item.is_authenticated = True
+                item.last_error = ''
+                item.last_auth_at = datetime.now(UTC).replace(tzinfo=None)
+            else:
+                raise MyTaxApiError('Для official_api требуется access_token')
+
+        released_tasks = await _release_waiting_auth_tasks(db, item.id)
+    except Exception as exc:
+        item.is_authenticated = False
+        item.last_error = str(exc)
+        await _create_log(
+            db,
+            'mytax_auth_check_failed',
+            f'Проверка авторизации профиля {item.name} неуспешна: {exc}',
+            level='error',
+            context={'profile_id': item.id, 'provider': item.provider},
+        )
+
+    await _create_log(db, 'mytax_profile_login', f'Обновлен статус авторизации: {item.name}', context={'profile_id': item.id})
     if released_tasks:
         await _create_log(
             db,
             'queue_resume_after_auth',
             f'Возобновлено задач после авторизации: {released_tasks}',
+            context={'profile_id': item.id, 'released_tasks': released_tasks},
         )
     await db.commit()
     await db.refresh(item)
     return item
+
+
+@router.post('/profiles/{profile_id}/auth/check', response_model=ProfileAuthStatusOut)
+async def check_profile_auth(profile_id: int, db: AsyncSession = Depends(get_db)) -> ProfileAuthStatusOut:
+    item = await db.get(MyTaxProfile, profile_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail='Profile not found')
+
+    provider = str(item.provider)
+    if provider != 'unofficial_api':
+        return ProfileAuthStatusOut(
+            profile_id=item.id,
+            is_authenticated=bool(item.access_token),
+            message='Для official_api доступна только локальная проверка наличия access_token',
+            provider=provider,
+            user={},
+        )
+
+    try:
+        client = UnofficialMyTaxClient(item)
+        user = await client.probe_auth()
+        item.is_authenticated = True
+        item.last_error = ''
+        item.last_auth_at = datetime.now(UTC).replace(tzinfo=None)
+        released = await _release_waiting_auth_tasks(db, item.id)
+        await _create_log(
+            db,
+            'mytax_auth_probe_success',
+            f'Проверка авторизации профиля {item.name} успешна',
+            context={'profile_id': item.id, 'released_tasks': released},
+        )
+        await db.commit()
+        return ProfileAuthStatusOut(
+            profile_id=item.id,
+            is_authenticated=True,
+            message='Проверка успешна',
+            provider=provider,
+            user=user if isinstance(user, dict) else {},
+        )
+    except Exception as exc:
+        item.is_authenticated = False
+        item.last_error = str(exc)
+        await _create_log(
+            db,
+            'mytax_auth_probe_failed',
+            f'Проверка авторизации профиля {item.name} провалилась: {exc}',
+            level='error',
+            context={'profile_id': item.id},
+        )
+        await db.commit()
+        return ProfileAuthStatusOut(
+            profile_id=item.id,
+            is_authenticated=False,
+            message=str(exc),
+            provider=provider,
+            user={},
+        )
+
+
+@router.post('/profiles/{profile_id}/auth/phone/start')
+async def start_profile_phone_auth(
+    profile_id: int,
+    payload: ProfilePhoneChallengeIn,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    item = await db.get(MyTaxProfile, profile_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail='Profile not found')
+    if str(item.provider) != 'unofficial_api':
+        raise HTTPException(status_code=400, detail='Phone auth is supported only for unofficial_api')
+
+    phone = (payload.phone or item.phone or '').strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail='Phone is required')
+
+    client = UnofficialMyTaxClient(item)
+    try:
+        result = await client.start_phone_challenge(phone)
+        item.phone = phone
+        await _create_log(
+            db,
+            'mytax_phone_challenge_started',
+            f'SMS challenge запрошен для профиля {item.name}',
+            context={'profile_id': item.id, 'phone': phone, 'response': result},
+        )
+        await db.commit()
+        return {'status': 'ok', 'phone': phone, **result}
+    except Exception as exc:
+        item.last_error = str(exc)
+        await _create_log(
+            db,
+            'mytax_phone_challenge_failed',
+            f'Не удалось запросить SMS challenge для профиля {item.name}: {exc}',
+            level='error',
+            context={'profile_id': item.id, 'phone': phone},
+        )
+        await db.commit()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post('/profiles/{profile_id}/auth/phone/verify', response_model=MyTaxProfileOut)
+async def verify_profile_phone_auth(
+    profile_id: int,
+    payload: ProfilePhoneVerifyIn,
+    db: AsyncSession = Depends(get_db),
+) -> MyTaxProfile:
+    item = await db.get(MyTaxProfile, profile_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail='Profile not found')
+    if str(item.provider) != 'unofficial_api':
+        raise HTTPException(status_code=400, detail='Phone auth is supported only for unofficial_api')
+
+    phone = (payload.phone or item.phone or '').strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail='Phone is required')
+
+    client = UnofficialMyTaxClient(item)
+    try:
+        token_payload = await client.verify_phone_challenge(phone, payload.challenge_token, payload.code)
+        token_payload_json = json.dumps(token_payload, ensure_ascii=False)
+        item.phone = phone
+        item.access_token = extract_access_token(token_payload_json)
+        item.refresh_token = extract_refresh_token(token_payload_json, item.refresh_token)
+        user = await client.probe_auth()
+        item.is_authenticated = True
+        item.last_error = ''
+        item.last_auth_at = datetime.now(UTC).replace(tzinfo=None)
+        released_tasks = await _release_waiting_auth_tasks(db, item.id)
+        await _create_log(
+            db,
+            'mytax_phone_auth_success',
+            f'Профиль {item.name} авторизован по телефону',
+            context={'profile_id': item.id, 'phone': phone, 'user': user, 'released_tasks': released_tasks},
+        )
+        await db.commit()
+        await db.refresh(item)
+        return item
+    except Exception as exc:
+        item.is_authenticated = False
+        item.last_error = str(exc)
+        await _create_log(
+            db,
+            'mytax_phone_auth_failed',
+            f'Ошибка подтверждения SMS-кода для профиля {item.name}: {exc}',
+            level='error',
+            context={'profile_id': item.id, 'phone': phone},
+        )
+        await db.commit()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get('/relay-targets', response_model=list[RelayTargetOut])
@@ -323,6 +593,8 @@ async def list_receipts(
 async def list_logs(
     store_id: int | None = Query(default=None),
     level: str | None = Query(default=None),
+    event: str | None = Query(default=None),
+    q: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> list[AppLog]:
     query: Select[tuple[AppLog]] = select(AppLog).order_by(AppLog.id.desc()).limit(500)
@@ -330,6 +602,10 @@ async def list_logs(
         query = query.where(AppLog.store_id == store_id)
     if level is not None:
         query = query.where(AppLog.level == level)
+    if event is not None:
+        query = query.where(AppLog.event == event)
+    if q:
+        query = query.where(AppLog.message.ilike(f'%{q}%'))
     result = await db.execute(query)
     return list(result.scalars().all())
 

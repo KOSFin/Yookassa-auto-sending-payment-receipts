@@ -15,6 +15,18 @@ const tabs = [
   { id: 'logs', label: 'Логи' },
 ]
 
+const emptyProfileForm = {
+  name: '',
+  provider: 'unofficial_api',
+  inn: '',
+  phone: '',
+  password: '',
+  device_id: '',
+  access_token: '',
+  refresh_token: '',
+  cookie_blob: '',
+}
+
 async function api(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -43,6 +55,15 @@ function App() {
   const [dateTo, setDateTo] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [editingProfileId, setEditingProfileId] = useState(null)
+  const [phoneAuthForm, setPhoneAuthForm] = useState({
+    profile_id: '',
+    phone: '',
+    challenge_token: '',
+    code: '',
+    expire_date: '',
+  })
+  const [logsSearch, setLogsSearch] = useState('')
 
   const [storeForm, setStoreForm] = useState({
     name: '',
@@ -60,17 +81,7 @@ function App() {
     mytax_profile_id: null,
   })
 
-  const [profileForm, setProfileForm] = useState({
-    name: '',
-    provider: 'unofficial_api',
-    inn: '',
-    phone: '',
-    password: '',
-    device_id: '',
-    access_token: '',
-    refresh_token: '',
-    cookie_blob: '',
-  })
+  const [profileForm, setProfileForm] = useState(emptyProfileForm)
 
   const [relayForm, setRelayForm] = useState({
     store_id: '',
@@ -102,6 +113,14 @@ function App() {
     return q ? `?${q}` : ''
   }, [selectedStoreId, dateFrom, dateTo])
 
+  const logsQuerySuffix = useMemo(() => {
+    const params = new URLSearchParams()
+    if (selectedStoreId) params.set('store_id', selectedStoreId)
+    if (logsSearch.trim()) params.set('q', logsSearch.trim())
+    const q = params.toString()
+    return q ? `?${q}` : ''
+  }, [selectedStoreId, logsSearch])
+
   const loadAll = async () => {
     setLoading(true)
     setError('')
@@ -124,7 +143,7 @@ function App() {
         api(`/events${querySuffix}`),
         api(`/queue${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`),
         api(`/receipts${querySuffix}`),
-        api(`/logs${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`),
+        api(`/logs${logsQuerySuffix}`),
         api(`/stats${querySuffix}`),
       ])
       setStores(storesRes)
@@ -145,7 +164,7 @@ function App() {
 
   useEffect(() => {
     loadAll()
-  }, [querySuffix, selectedStoreId])
+  }, [querySuffix, selectedStoreId, logsQuerySuffix])
 
   const createStore = async (event) => {
     event.preventDefault()
@@ -168,21 +187,12 @@ function App() {
   const createProfile = async (event) => {
     event.preventDefault()
     try {
-      await api('/profiles', {
-        method: 'POST',
+      await api(editingProfileId ? `/profiles/${editingProfileId}` : '/profiles', {
+        method: editingProfileId ? 'PUT' : 'POST',
         body: JSON.stringify(profileForm),
       })
-      setProfileForm({
-        name: '',
-        provider: 'unofficial_api',
-        inn: '',
-        phone: '',
-        password: '',
-        device_id: '',
-        access_token: '',
-        refresh_token: '',
-        cookie_blob: '',
-      })
+      setProfileForm(emptyProfileForm)
+      setEditingProfileId(null)
       await loadAll()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка создания профиля')
@@ -198,6 +208,93 @@ function App() {
       await loadAll()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка авторизации профиля')
+    }
+  }
+
+  const checkProfileAuth = async (profileId) => {
+    try {
+      const result = await api(`/profiles/${profileId}/auth/check`, {
+        method: 'POST',
+      })
+      if (!result.is_authenticated) {
+        setError(result.message || 'Проверка авторизации неуспешна')
+      }
+      await loadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка проверки профиля')
+    }
+  }
+
+  const startPhoneAuth = async (profile) => {
+    try {
+      const result = await api(`/profiles/${profile.id}/auth/phone/start`, {
+        method: 'POST',
+        body: JSON.stringify({ phone: profile.phone || profileForm.phone || '' }),
+      })
+      setPhoneAuthForm({
+        profile_id: String(profile.id),
+        phone: result.phone || profile.phone || '',
+        challenge_token: result.challengeToken || '',
+        code: '',
+        expire_date: result.expireDate || '',
+      })
+      await loadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка запроса SMS-кода')
+    }
+  }
+
+  const verifyPhoneAuth = async (event) => {
+    event.preventDefault()
+    if (!phoneAuthForm.profile_id) return
+    try {
+      await api(`/profiles/${phoneAuthForm.profile_id}/auth/phone/verify`, {
+        method: 'POST',
+        body: JSON.stringify({
+          phone: phoneAuthForm.phone,
+          challenge_token: phoneAuthForm.challenge_token,
+          code: phoneAuthForm.code,
+        }),
+      })
+      setPhoneAuthForm({ profile_id: '', phone: '', challenge_token: '', code: '', expire_date: '' })
+      await loadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка подтверждения SMS-кода')
+    }
+  }
+
+  const startEditProfile = (profile) => {
+    setEditingProfileId(profile.id)
+    setProfileForm({
+      name: profile.name || '',
+      provider: profile.provider || 'unofficial_api',
+      inn: profile.inn || '',
+      phone: profile.phone || '',
+      password: profile.password || '',
+      device_id: profile.device_id || '',
+      access_token: profile.access_token || '',
+      refresh_token: profile.refresh_token || '',
+      cookie_blob: profile.cookie_blob || '',
+    })
+  }
+
+  const cancelProfileEdit = () => {
+    setEditingProfileId(null)
+    setProfileForm(emptyProfileForm)
+  }
+
+  const deleteProfile = async (profileId) => {
+    try {
+      await api(`/profiles/${profileId}`, { method: 'DELETE' })
+      if (editingProfileId === profileId) {
+        cancelProfileEdit()
+      }
+      if (String(phoneAuthForm.profile_id) === String(profileId)) {
+        setPhoneAuthForm({ profile_id: '', phone: '', challenge_token: '', code: '', expire_date: '' })
+      }
+      await loadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка удаления профиля')
     }
   }
 
@@ -356,7 +453,7 @@ function App() {
       {activeTab === 'profiles' && (
         <section className="stack">
           <form className="form" onSubmit={createProfile}>
-            <h2>Добавить профиль «Мой налог»</h2>
+            <h2>{editingProfileId ? 'Редактировать профиль «Мой налог»' : 'Добавить профиль «Мой налог»'}</h2>
             <div className="grid cols-2">
               <input placeholder="Название" value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} required />
               <select value={profileForm.provider} onChange={(e) => setProfileForm({ ...profileForm, provider: e.target.value })}>
@@ -371,12 +468,32 @@ function App() {
               <input placeholder="refresh_token" value={profileForm.refresh_token} onChange={(e) => setProfileForm({ ...profileForm, refresh_token: e.target.value })} />
               <input placeholder="cookie_blob" value={profileForm.cookie_blob} onChange={(e) => setProfileForm({ ...profileForm, cookie_blob: e.target.value })} />
             </div>
-            <button type="submit">Сохранить профиль</button>
+            <div className="actions-row">
+              <button type="submit">{editingProfileId ? 'Сохранить изменения' : 'Сохранить профиль'}</button>
+              {editingProfileId ? <button type="button" onClick={cancelProfileEdit}>Отмена</button> : null}
+            </div>
           </form>
+
+          {phoneAuthForm.profile_id ? (
+            <form className="form" onSubmit={verifyPhoneAuth}>
+              <h2>Подтверждение входа по телефону</h2>
+              <div className="grid cols-2">
+                <input placeholder="ID профиля" value={phoneAuthForm.profile_id} onChange={(e) => setPhoneAuthForm({ ...phoneAuthForm, profile_id: e.target.value })} required />
+                <input placeholder="Телефон" value={phoneAuthForm.phone} onChange={(e) => setPhoneAuthForm({ ...phoneAuthForm, phone: e.target.value })} required />
+                <input placeholder="challengeToken" value={phoneAuthForm.challenge_token} onChange={(e) => setPhoneAuthForm({ ...phoneAuthForm, challenge_token: e.target.value })} required />
+                <input placeholder="Код из SMS" value={phoneAuthForm.code} onChange={(e) => setPhoneAuthForm({ ...phoneAuthForm, code: e.target.value })} required />
+              </div>
+              <p>Срок действия challenge: {phoneAuthForm.expire_date || 'неизвестно'}</p>
+              <div className="actions-row">
+                <button type="submit">Подтвердить код</button>
+                <button type="button" onClick={() => setPhoneAuthForm({ profile_id: '', phone: '', challenge_token: '', code: '', expire_date: '' })}>Отмена</button>
+              </div>
+            </form>
+          ) : null}
 
           <div className="table-wrap">
             <table>
-              <thead><tr><th>ID</th><th>Название</th><th>Provider</th><th>Статус</th><th>Последняя ошибка</th><th></th></tr></thead>
+              <thead><tr><th>ID</th><th>Название</th><th>Provider</th><th>Статус</th><th>Последняя ошибка</th><th>Действия</th></tr></thead>
               <tbody>
                 {profiles.map((profile) => (
                   <tr key={profile.id}>
@@ -385,7 +502,15 @@ function App() {
                     <td>{profile.provider}</td>
                     <td>{profile.is_authenticated ? 'Авторизован' : 'Не авторизован'}</td>
                     <td>{profile.last_error || '-'}</td>
-                    <td><button onClick={() => loginProfile(profile.id)}>Проверить вход</button></td>
+                    <td>
+                      <div className="actions-row">
+                        <button onClick={() => loginProfile(profile.id)}>Войти/переавторизовать</button>
+                        <button onClick={() => checkProfileAuth(profile.id)}>Проверить сессию</button>
+                        <button onClick={() => startPhoneAuth(profile)}>Запросить SMS</button>
+                        <button onClick={() => startEditProfile(profile)}>Редактировать</button>
+                        <button onClick={() => deleteProfile(profile.id)}>Удалить</button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -514,18 +639,24 @@ function App() {
       )}
 
       {activeTab === 'logs' && (
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>ID</th><th>Store</th><th>Level</th><th>Event</th><th>Сообщение</th><th>Дата</th></tr></thead>
-            <tbody>
-              {logs.map((item) => (
-                <tr key={item.id}>
-                  <td>{item.id}</td><td>{item.store_id || '-'}</td><td>{item.level}</td><td>{item.event}</td><td>{item.message}</td><td>{item.created_at}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <section className="stack">
+          <div className="form">
+            <h2>Фильтр логов</h2>
+            <input placeholder="Поиск по сообщению" value={logsSearch} onChange={(e) => setLogsSearch(e.target.value)} />
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>Store</th><th>Level</th><th>Event</th><th>Сообщение</th><th>Context</th><th>Дата</th></tr></thead>
+              <tbody>
+                {logs.map((item) => (
+                  <tr key={item.id}>
+                    <td>{item.id}</td><td>{item.store_id || '-'}</td><td>{item.level}</td><td>{item.event}</td><td>{item.message}</td><td>{item.context ? JSON.stringify(item.context) : '-'}</td><td>{item.created_at}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
       )}
     </div>
   )

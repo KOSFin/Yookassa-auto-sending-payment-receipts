@@ -57,7 +57,12 @@ class MyTaxProfileOut(BaseModel):
     name: str
     provider: MyTaxProvider
     inn: str | None = None
+    password: str | None = None
     phone: str | None = None
+    device_id: str | None = None
+    access_token: str | None = None
+    refresh_token: str | None = None
+    cookie_blob: str | None = None
     is_authenticated: bool
     last_error: str
     last_auth_at: datetime | None = None
@@ -164,6 +169,24 @@ class QueueRetryIn(BaseModel):
 
 class LoginProfileIn(BaseModel):
     force: bool = False
+
+
+class ProfilePhoneChallengeIn(BaseModel):
+    phone: str | None = None
+
+
+class ProfilePhoneVerifyIn(BaseModel):
+    phone: str | None = None
+    challenge_token: str
+    code: str
+
+
+class ProfileAuthStatusOut(BaseModel):
+    profile_id: int
+    is_authenticated: bool
+    message: str = ''
+    provider: str
+    user: dict = Field(default_factory=dict)
 
 
 class StatsOut(BaseModel):

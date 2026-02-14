@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -23,6 +25,83 @@ class MyTaxReceiptResult:
     receipt_uuid: str
     receipt_url: str
     raw: dict
+
+
+def _parse_json_value(raw: str | None) -> dict[str, Any] | None:
+    if not raw:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    if not value.startswith('{'):
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def extract_access_token(raw: str | None) -> str:
+    if not raw:
+        return ''
+    parsed = _parse_json_value(raw)
+    if not parsed:
+        return raw.strip()
+    token = parsed.get('token') or parsed.get('accessToken') or parsed.get('access_token')
+    if isinstance(token, str):
+        return token.strip()
+    return raw.strip()
+
+
+def extract_refresh_token(raw_access_token: str | None, raw_refresh_token: str | None) -> str:
+    if raw_refresh_token:
+        return raw_refresh_token.strip()
+    parsed = _parse_json_value(raw_access_token)
+    if not parsed:
+        return ''
+    token = parsed.get('refreshToken') or parsed.get('refresh_token')
+    return token.strip() if isinstance(token, str) else ''
+
+
+def normalize_cookie_blob(raw: str | None) -> str:
+    if not raw:
+        return ''
+    value = raw.strip()
+    if not value:
+        return ''
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    if isinstance(parsed, dict):
+        cookie_value = parsed.get('cookie') or parsed.get('Cookie')
+        if isinstance(cookie_value, str):
+            return cookie_value.strip()
+        cookies = parsed.get('cookies')
+        if isinstance(cookies, list):
+            pairs = []
+            for item in cookies:
+                if isinstance(item, dict):
+                    name = item.get('name')
+                    cookie_item_value = item.get('value')
+                    if isinstance(name, str) and isinstance(cookie_item_value, str):
+                        pairs.append(f'{name}={cookie_item_value}')
+            if pairs:
+                return '; '.join(pairs)
+    if isinstance(parsed, list):
+        pairs = []
+        for item in parsed:
+            if isinstance(item, dict):
+                name = item.get('name')
+                cookie_item_value = item.get('value')
+                if isinstance(name, str) and isinstance(cookie_item_value, str):
+                    pairs.append(f'{name}={cookie_item_value}')
+        if pairs:
+            return '; '.join(pairs)
+    return value
 
 
 def _resolve_income_payment_type(payload: dict[str, Any] | None) -> str:
@@ -50,7 +129,7 @@ class MyTaxClient:
         url: str,
         json_payload: dict | None = None,
         headers: dict | None = None,
-    ) -> dict:
+    ) -> Any:
         try:
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.request(method, url, json=json_payload, headers=headers)
@@ -59,7 +138,15 @@ class MyTaxClient:
             if response.status_code >= 400:
                 raise MyTaxApiError(f'MyTax API error {response.status_code}: {response.text}')
             if response.content:
-                return response.json()
+                content_type = response.headers.get('Content-Type', '')
+                if 'application/json' in content_type.lower():
+                    return response.json()
+                text = response.text.strip()
+                if text:
+                    try:
+                        return response.json()
+                    except ValueError:
+                        return {'raw_text': text}
             return {}
         except MyTaxAuthError:
             raise
@@ -86,21 +173,91 @@ class MyTaxClient:
 class UnofficialMyTaxClient(MyTaxClient):
     base_url = 'https://lknpd.nalog.ru'
 
+    def _resolved_device_id(self) -> str:
+        if self.profile.device_id and self.profile.device_id.strip():
+            return self.profile.device_id.strip()
+        generated = f'ya-{self.profile.id}-{uuid4().hex[:10]}'
+        self.profile.device_id = generated
+        return generated
+
+    def _device_info(self) -> dict[str, Any]:
+        return {
+            'sourceType': 'WEB',
+            'sourceDeviceId': self._resolved_device_id(),
+            'appVersion': '1.0.0',
+            'metaDetails': {
+                'userAgent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            },
+        }
+
     async def ensure_authenticated(self) -> None:
         if not self.profile.is_authenticated:
             raise MyTaxAuthError('Профиль не аутентифицирован')
-        if not (self.profile.access_token or self.profile.cookie_blob):
+        if not (extract_access_token(self.profile.access_token) or normalize_cookie_blob(self.profile.cookie_blob)):
             raise MyTaxAuthError('Нет access_token/cookie для неофициального API')
 
     def _headers(self) -> dict:
         headers: dict[str, str] = {'Content-Type': 'application/json'}
-        if self.profile.access_token:
-            headers['Authorization'] = f'Bearer {self.profile.access_token}'
-        if self.profile.cookie_blob:
-            headers['Cookie'] = self.profile.cookie_blob
-        if self.profile.device_id:
-            headers['Device-Id'] = self.profile.device_id
+        access_token = extract_access_token(self.profile.access_token)
+        cookie_blob = normalize_cookie_blob(self.profile.cookie_blob)
+        if access_token:
+            headers['Authorization'] = f'Bearer {access_token}'
+        if cookie_blob:
+            headers['Cookie'] = cookie_blob
+        headers['Device-Id'] = self._resolved_device_id()
         return headers
+
+    async def probe_auth(self) -> dict[str, Any]:
+        headers = self._headers()
+        return await self._request('GET', f'{self.base_url}/api/v1/user', headers=headers)
+
+    async def login_with_inn_password(self) -> dict[str, Any]:
+        if not (self.profile.inn and self.profile.password):
+            raise MyTaxAuthError('Для входа по ИНН/паролю требуется указать оба поля')
+        payload = {
+            'username': self.profile.inn,
+            'password': self.profile.password,
+            'deviceInfo': self._device_info(),
+        }
+        token_payload = await self._request(
+            'POST',
+            f'{self.base_url}/api/v1/auth/lkfl',
+            json_payload=payload,
+            headers={'Content-Type': 'application/json', 'Referrer': 'https://lknpd.nalog.ru/auth/login'},
+        )
+        if isinstance(token_payload, dict):
+            return token_payload
+        raise MyTaxApiError('Не удалось получить токен по ИНН/паролю: неожиданный формат ответа')
+
+    async def start_phone_challenge(self, phone: str) -> dict[str, Any]:
+        payload = {'phone': phone, 'requireTpToBeActive': True}
+        response = await self._request(
+            'POST',
+            f'{self.base_url}/api/v2/auth/challenge/sms/start',
+            json_payload=payload,
+            headers={'Content-Type': 'application/json', 'Referrer': 'https://lknpd.nalog.ru/auth/login'},
+        )
+        if isinstance(response, dict):
+            return response
+        raise MyTaxApiError('Не удалось получить challengeToken: неожиданный формат ответа')
+
+    async def verify_phone_challenge(self, phone: str, challenge_token: str, code: str) -> dict[str, Any]:
+        payload = {
+            'phone': phone,
+            'code': code,
+            'challengeToken': challenge_token,
+            'deviceInfo': self._device_info(),
+        }
+        token_payload = await self._request(
+            'POST',
+            f'{self.base_url}/api/v1/auth/challenge/sms/verify',
+            json_payload=payload,
+            headers={'Content-Type': 'application/json', 'Referrer': 'https://lknpd.nalog.ru/auth/login'},
+        )
+        if isinstance(token_payload, dict):
+            return token_payload
+        raise MyTaxApiError('Не удалось подтвердить SMS-код: неожиданный формат ответа')
 
     async def create_receipt(
         self,
