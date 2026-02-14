@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
 from typing import Any
 from urllib.parse import unquote
@@ -162,6 +163,17 @@ def _resolve_income_payment_type(payload: dict[str, Any] | None) -> str:
     if isinstance(method_type, str) and method_type.lower() == 'cash':
         return 'CASH'
     return 'WIRE'
+
+
+def _normalize_amount_string(value: float | str | int) -> str:
+    try:
+        amount_decimal = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise MyTaxApiError(f'Некорректная сумма для чека: {value}') from exc
+    normalized = amount_decimal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    if normalized <= Decimal('0'):
+        raise MyTaxApiError(f'Сумма для чека должна быть больше 0: {normalized}')
+    return str(normalized)
 
 
 class MyTaxClient:
@@ -364,8 +376,8 @@ class UnofficialMyTaxClient(MyTaxClient):
         await self.ensure_authenticated()
         operation_time = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
         payment_type = _resolve_income_payment_type(event_payload)
-        amount_value = float(amount)
-        base_payload = {
+        amount_value = _normalize_amount_string(amount)
+        payload = {
             'operationTime': operation_time,
             'requestTime': operation_time,
             'services': [
@@ -379,36 +391,13 @@ class UnofficialMyTaxClient(MyTaxClient):
             'ignoreMaxTotalIncomeRestriction': True,
             'client': {'displayName': ''},
             'externalIncomeId': payment_id,
+            'totalAmount': amount_value,
         }
-
-        payload_variants = [
-            {**base_payload, 'totalAmount': amount_value},
-            {**base_payload, 'totalIncomeAmount': amount_value},
-            {**base_payload, 'total_amount': amount_value},
-        ]
-
-        last_error: Exception | None = None
-        raw: dict[str, Any] | None = None
-        for payload in payload_variants:
-            try:
-                response = await self._request('POST', f'{self.base_url}/api/v1/income', json_payload=payload, headers=self._headers())
-                if isinstance(response, dict):
-                    raw = response
-                    break
-                raw = {'raw': response}
-                break
-            except MyTaxApiError as exc:
-                code = str((exc.payload or {}).get('code') or '')
-                message = str((exc.payload or {}).get('message') or str(exc)).lower()
-                if code == 'validation.failed' and 'общая сумма дохода' in message:
-                    last_error = exc
-                    continue
-                raise
-
-        if raw is None:
-            if last_error is not None:
-                raise last_error
-            raise MyTaxApiError('Не удалось сформировать чек: неожиданный формат ответа')
+        response = await self._request('POST', f'{self.base_url}/api/v1/income', json_payload=payload, headers=self._headers())
+        if isinstance(response, dict):
+            raw = response
+        else:
+            raw = {'raw': response}
 
         receipt_uuid = str(raw.get('approvedReceiptUuid') or raw.get('receiptUuid') or raw.get('id') or payment_id)
         receipt_url = str(raw.get('receiptUrl') or f'{self.base_url}/web/receipts/{receipt_uuid}')
