@@ -127,6 +127,14 @@ RUN_EMBEDDED_WORKER=false
 docker compose up -d --build
 ```
 
+Если `proxy` иногда зависает после предыдущих запусков, используйте автоматический скрипт (Windows PowerShell):
+
+```powershell
+./scripts/up.ps1
+```
+
+Скрипт сам удаляет контейнер `proxy` перед пересборкой и запускает стек с `--remove-orphans`.
+
 ### 3) Доступ
 
 - UI: `http://<server-ip>/`
@@ -167,6 +175,7 @@ https://your-domain.tld/webhook/<store_path>
 - вход по телефону в 2 шага: `SMS challenge` → подтверждение кода;
 - редактирование и удаление профилей;
 - расширенные auth-логи в отдельной вкладке `Логи` (включая `context`).
+- отдельная загрузка auth-логов по конкретному профилю (`Auth-логи` в таблице профилей).
 
 ### 2) Магазин
 
@@ -286,6 +295,7 @@ https://your-domain.tld/webhook/<store_path>
 - `POST /api/profiles/{id}/auth/check`
 - `POST /api/profiles/{id}/auth/phone/start`
 - `POST /api/profiles/{id}/auth/phone/verify`
+- `GET /api/profiles/{id}/logs`
 - `GET/POST /api/relay-targets`
 - `GET/POST /api/telegram-channels`
 - `POST /api/webhook/{store_path}`

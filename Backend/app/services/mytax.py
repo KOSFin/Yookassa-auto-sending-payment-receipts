@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 from typing import Any
+from urllib.parse import unquote
 from uuid import uuid4
 
 import httpx
@@ -104,6 +105,35 @@ def normalize_cookie_blob(raw: str | None) -> str:
     return value
 
 
+def _cookie_pairs(raw: str | None) -> list[tuple[str, str]]:
+    normalized = normalize_cookie_blob(raw)
+    if not normalized:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for chunk in normalized.split(';'):
+        part = chunk.strip()
+        if not part or '=' not in part:
+            continue
+        name, value = part.split('=', 1)
+        key = name.strip()
+        item_value = value.strip()
+        if key:
+            pairs.append((key, item_value))
+    return pairs
+
+
+def extract_cookie_names(raw: str | None) -> list[str]:
+    names = {name for name, _ in _cookie_pairs(raw)}
+    return sorted(names)
+
+
+def extract_xsrf_token(raw: str | None) -> str:
+    for name, value in _cookie_pairs(raw):
+        if name.lower() in {'xsrf-token', 'x-xsrf-token'}:
+            return unquote(value)
+    return ''
+
+
 def _resolve_income_payment_type(payload: dict[str, Any] | None) -> str:
     if not payload:
         return 'WIRE'
@@ -198,19 +228,40 @@ class UnofficialMyTaxClient(MyTaxClient):
             raise MyTaxAuthError('Нет access_token/cookie для неофициального API')
 
     def _headers(self) -> dict:
-        headers: dict[str, str] = {'Content-Type': 'application/json'}
+        headers: dict[str, str] = {
+            'Accept': 'application/json, text/plain, */*',
+            'Content-Type': 'application/json',
+            'Origin': self.base_url,
+            'Referer': f'{self.base_url}/',
+            'User-Agent': self._device_info()['metaDetails']['userAgent'],
+        }
         access_token = extract_access_token(self.profile.access_token)
         cookie_blob = normalize_cookie_blob(self.profile.cookie_blob)
         if access_token:
             headers['Authorization'] = f'Bearer {access_token}'
         if cookie_blob:
             headers['Cookie'] = cookie_blob
+        xsrf_token = extract_xsrf_token(cookie_blob)
+        if xsrf_token:
+            headers['X-XSRF-TOKEN'] = xsrf_token
         headers['Device-Id'] = self._resolved_device_id()
         return headers
 
     async def probe_auth(self) -> dict[str, Any]:
         headers = self._headers()
-        return await self._request('GET', f'{self.base_url}/api/v1/user', headers=headers)
+        endpoints = ('/api/v1/user', '/api/v1/taxpayer')
+        last_error: Exception | None = None
+        for endpoint in endpoints:
+            try:
+                response = await self._request('GET', f'{self.base_url}{endpoint}', headers=headers)
+                if isinstance(response, dict):
+                    return response
+                return {'raw': response}
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise MyTaxApiError('Не удалось выполнить проверку авторизации')
 
     async def login_with_inn_password(self) -> dict[str, Any]:
         if not (self.profile.inn and self.profile.password):
@@ -231,16 +282,25 @@ class UnofficialMyTaxClient(MyTaxClient):
         raise MyTaxApiError('Не удалось получить токен по ИНН/паролю: неожиданный формат ответа')
 
     async def start_phone_challenge(self, phone: str) -> dict[str, Any]:
-        payload = {'phone': phone, 'requireTpToBeActive': True}
-        response = await self._request(
-            'POST',
-            f'{self.base_url}/api/v2/auth/challenge/sms/start',
-            json_payload=payload,
-            headers={'Content-Type': 'application/json', 'Referrer': 'https://lknpd.nalog.ru/auth/login'},
-        )
-        if isinstance(response, dict):
-            return response
-        raise MyTaxApiError('Не удалось получить challengeToken: неожиданный формат ответа')
+        for require_tp in (True, False):
+            payload = {'phone': phone, 'requireTpToBeActive': require_tp}
+            try:
+                response = await self._request(
+                    'POST',
+                    f'{self.base_url}/api/v2/auth/challenge/sms/start',
+                    json_payload=payload,
+                    headers={'Content-Type': 'application/json', 'Referrer': 'https://lknpd.nalog.ru/auth/login'},
+                )
+                if isinstance(response, dict):
+                    response.setdefault('requireTpToBeActive', require_tp)
+                    return response
+                raise MyTaxApiError('Не удалось получить challengeToken: неожиданный формат ответа')
+            except MyTaxApiError as exc:
+                message = str(exc)
+                if require_tp and 'auth.failed.no.tp' in message:
+                    continue
+                raise
+        raise MyTaxApiError('Не удалось запросить SMS challenge')
 
     async def verify_phone_challenge(self, phone: str, challenge_token: str, code: str) -> dict[str, Any]:
         payload = {
@@ -249,14 +309,22 @@ class UnofficialMyTaxClient(MyTaxClient):
             'challengeToken': challenge_token,
             'deviceInfo': self._device_info(),
         }
-        token_payload = await self._request(
-            'POST',
-            f'{self.base_url}/api/v1/auth/challenge/sms/verify',
-            json_payload=payload,
-            headers={'Content-Type': 'application/json', 'Referrer': 'https://lknpd.nalog.ru/auth/login'},
-        )
-        if isinstance(token_payload, dict):
-            return token_payload
+        endpoints = ('/api/v1/auth/challenge/sms/verify', '/api/v2/auth/challenge/sms/verify')
+        last_error: Exception | None = None
+        for endpoint in endpoints:
+            try:
+                token_payload = await self._request(
+                    'POST',
+                    f'{self.base_url}{endpoint}',
+                    json_payload=payload,
+                    headers={'Content-Type': 'application/json', 'Referrer': 'https://lknpd.nalog.ru/auth/login'},
+                )
+                if isinstance(token_payload, dict):
+                    return token_payload
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
         raise MyTaxApiError('Не удалось подтвердить SMS-код: неожиданный формат ответа')
 
     async def create_receipt(

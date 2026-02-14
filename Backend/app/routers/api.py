@@ -45,6 +45,7 @@ from app.schemas import (
 from app.services.mytax import (
     MyTaxApiError,
     UnofficialMyTaxClient,
+    extract_cookie_names,
     extract_access_token,
     extract_refresh_token,
     normalize_cookie_blob,
@@ -97,6 +98,22 @@ def _sanitize_profile_payload(payload: MyTaxProfileCreate) -> dict:
     data['refresh_token'] = normalized_refresh_token
     data['cookie_blob'] = normalize_cookie_blob(data.get('cookie_blob'))
     return data
+
+
+def _profile_auth_context(item: MyTaxProfile) -> dict:
+    cookie_blob = normalize_cookie_blob(item.cookie_blob)
+    return {
+        'profile_id': item.id,
+        'provider': str(item.provider),
+        'has_inn': bool((item.inn or '').strip()),
+        'has_password': bool((item.password or '').strip()),
+        'has_phone': bool((item.phone or '').strip()),
+        'has_access_token': bool(extract_access_token(item.access_token)),
+        'has_refresh_token': bool((item.refresh_token or '').strip()),
+        'has_cookie_blob': bool(cookie_blob),
+        'cookie_names': extract_cookie_names(cookie_blob),
+        'device_id': item.device_id or '',
+    }
 
 
 async def _release_waiting_auth_tasks(db: AsyncSession, profile_id: int) -> int:
@@ -236,7 +253,7 @@ async def login_profile(profile_id: int, payload: LoginProfileIn, db: AsyncSessi
         db,
         'mytax_auth_check_started',
         f'Запущена проверка авторизации профиля {item.name}',
-        context={'profile_id': item.id, 'provider': item.provider},
+        context=_profile_auth_context(item),
     )
 
     try:
@@ -253,7 +270,7 @@ async def login_profile(profile_id: int, payload: LoginProfileIn, db: AsyncSessi
                     db,
                     'mytax_auth_check_success',
                     f'Профиль {item.name} авторизован по access_token/cookie',
-                    context={'profile_id': item.id, 'user': probe_user},
+                    context={**_profile_auth_context(item), 'auth_method': 'token_or_cookie', 'user': probe_user},
                 )
             elif item.inn and item.password:
                 token_payload = await client.login_with_inn_password()
@@ -267,7 +284,7 @@ async def login_profile(profile_id: int, payload: LoginProfileIn, db: AsyncSessi
                     db,
                     'mytax_auth_login_password_success',
                     f'Профиль {item.name} авторизован по ИНН/паролю',
-                    context={'profile_id': item.id, 'user': probe_user},
+                    context={**_profile_auth_context(item), 'auth_method': 'inn_password', 'user': probe_user},
                 )
             elif payload.force:
                 raise MyTaxApiError('Недостаточно данных для проверки. Нужны cookie/access_token или ИНН+пароль')
@@ -291,7 +308,7 @@ async def login_profile(profile_id: int, payload: LoginProfileIn, db: AsyncSessi
             'mytax_auth_check_failed',
             f'Проверка авторизации профиля {item.name} неуспешна: {exc}',
             level='error',
-            context={'profile_id': item.id, 'provider': item.provider},
+            context={**_profile_auth_context(item), 'error': str(exc)},
         )
 
     await _create_log(db, 'mytax_profile_login', f'Обновлен статус авторизации: {item.name}', context={'profile_id': item.id})
@@ -325,6 +342,12 @@ async def check_profile_auth(profile_id: int, db: AsyncSession = Depends(get_db)
 
     try:
         client = UnofficialMyTaxClient(item)
+        await _create_log(
+            db,
+            'mytax_auth_probe_started',
+            f'Запущен auth probe профиля {item.name}',
+            context=_profile_auth_context(item),
+        )
         user = await client.probe_auth()
         item.is_authenticated = True
         item.last_error = ''
@@ -334,7 +357,7 @@ async def check_profile_auth(profile_id: int, db: AsyncSession = Depends(get_db)
             db,
             'mytax_auth_probe_success',
             f'Проверка авторизации профиля {item.name} успешна',
-            context={'profile_id': item.id, 'released_tasks': released},
+            context={**_profile_auth_context(item), 'released_tasks': released},
         )
         await db.commit()
         return ProfileAuthStatusOut(
@@ -352,7 +375,7 @@ async def check_profile_auth(profile_id: int, db: AsyncSession = Depends(get_db)
             'mytax_auth_probe_failed',
             f'Проверка авторизации профиля {item.name} провалилась: {exc}',
             level='error',
-            context={'profile_id': item.id},
+            context={**_profile_auth_context(item), 'error': str(exc)},
         )
         await db.commit()
         return ProfileAuthStatusOut(
@@ -382,13 +405,19 @@ async def start_profile_phone_auth(
 
     client = UnofficialMyTaxClient(item)
     try:
+        await _create_log(
+            db,
+            'mytax_phone_challenge_start_requested',
+            f'Запрошен старт SMS challenge для профиля {item.name}',
+            context={**_profile_auth_context(item), 'phone': phone},
+        )
         result = await client.start_phone_challenge(phone)
         item.phone = phone
         await _create_log(
             db,
             'mytax_phone_challenge_started',
             f'SMS challenge запрошен для профиля {item.name}',
-            context={'profile_id': item.id, 'phone': phone, 'response': result},
+            context={**_profile_auth_context(item), 'phone': phone, 'response': result},
         )
         await db.commit()
         return {'status': 'ok', 'phone': phone, **result}
@@ -399,7 +428,7 @@ async def start_profile_phone_auth(
             'mytax_phone_challenge_failed',
             f'Не удалось запросить SMS challenge для профиля {item.name}: {exc}',
             level='error',
-            context={'profile_id': item.id, 'phone': phone},
+            context={**_profile_auth_context(item), 'phone': phone, 'error': str(exc)},
         )
         await db.commit()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -423,6 +452,12 @@ async def verify_profile_phone_auth(
 
     client = UnofficialMyTaxClient(item)
     try:
+        await _create_log(
+            db,
+            'mytax_phone_verify_started',
+            f'Запущена проверка SMS-кода для профиля {item.name}',
+            context={**_profile_auth_context(item), 'phone': phone},
+        )
         token_payload = await client.verify_phone_challenge(phone, payload.challenge_token, payload.code)
         token_payload_json = json.dumps(token_payload, ensure_ascii=False)
         item.phone = phone
@@ -437,7 +472,7 @@ async def verify_profile_phone_auth(
             db,
             'mytax_phone_auth_success',
             f'Профиль {item.name} авторизован по телефону',
-            context={'profile_id': item.id, 'phone': phone, 'user': user, 'released_tasks': released_tasks},
+            context={**_profile_auth_context(item), 'phone': phone, 'user': user, 'released_tasks': released_tasks},
         )
         await db.commit()
         await db.refresh(item)
@@ -450,10 +485,30 @@ async def verify_profile_phone_auth(
             'mytax_phone_auth_failed',
             f'Ошибка подтверждения SMS-кода для профиля {item.name}: {exc}',
             level='error',
-            context={'profile_id': item.id, 'phone': phone},
+            context={**_profile_auth_context(item), 'phone': phone, 'error': str(exc)},
         )
         await db.commit()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get('/profiles/{profile_id}/logs', response_model=list[AppLogOut])
+async def list_profile_logs(
+    profile_id: int,
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+) -> list[AppLog]:
+    item = await db.get(MyTaxProfile, profile_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail='Profile not found')
+
+    result = await db.execute(select(AppLog).order_by(AppLog.id.desc()).limit(2000))
+    logs = list(result.scalars().all())
+    filtered = [
+        log
+        for log in logs
+        if isinstance(log.context, dict) and str(log.context.get('profile_id', '')) == str(profile_id)
+    ]
+    return filtered[:limit]
 
 
 @router.get('/relay-targets', response_model=list[RelayTargetOut])

@@ -1,3 +1,5 @@
+name: yookassa-auto
+
 services:
   postgres:
     image: postgres:16

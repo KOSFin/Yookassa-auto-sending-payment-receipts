@@ -34,9 +34,42 @@ async function api(path, options = {}) {
   })
   if (!response.ok) {
     const text = await response.text()
-    throw new Error(text || `HTTP ${response.status}`)
+    let message = text || `HTTP ${response.status}`
+    try {
+      const payload = text ? JSON.parse(text) : null
+      if (payload?.detail) {
+        if (typeof payload.detail === 'string') {
+          message = payload.detail
+        } else {
+          message = JSON.stringify(payload.detail)
+        }
+      }
+    } catch {
+      // no-op
+    }
+    throw new Error(message)
   }
   return response.json()
+}
+
+function formatErrorMessage(error) {
+  if (!(error instanceof Error)) {
+    return 'Неизвестная ошибка'
+  }
+  const raw = (error.message || '').trim()
+  if (!raw) return 'Неизвестная ошибка'
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed?.detail && typeof parsed.detail === 'string') {
+      return parsed.detail
+    }
+    if (parsed?.message && typeof parsed.message === 'string') {
+      return parsed.message
+    }
+    return JSON.stringify(parsed)
+  } catch {
+    return raw
+  }
 }
 
 function App() {
@@ -64,6 +97,9 @@ function App() {
     expire_date: '',
   })
   const [logsSearch, setLogsSearch] = useState('')
+  const [selectedProfileLogsId, setSelectedProfileLogsId] = useState('')
+  const [profileLogs, setProfileLogs] = useState([])
+  const [profileLogsLoading, setProfileLogsLoading] = useState(false)
 
   const [storeForm, setStoreForm] = useState({
     name: '',
@@ -156,7 +192,7 @@ function App() {
       setLogs(logsRes)
       setStats(statsRes)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка загрузки')
+      setError(formatErrorMessage(err))
     } finally {
       setLoading(false)
     }
@@ -180,7 +216,7 @@ function App() {
       setStoreForm({ ...storeForm, name: '', webhook_path: '' })
       await loadAll()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка создания магазина')
+      setError(formatErrorMessage(err))
     }
   }
 
@@ -195,7 +231,7 @@ function App() {
       setEditingProfileId(null)
       await loadAll()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка создания профиля')
+      setError(formatErrorMessage(err))
     }
   }
 
@@ -207,7 +243,7 @@ function App() {
       })
       await loadAll()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка авторизации профиля')
+      setError(formatErrorMessage(err))
     }
   }
 
@@ -221,7 +257,7 @@ function App() {
       }
       await loadAll()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка проверки профиля')
+      setError(formatErrorMessage(err))
     }
   }
 
@@ -240,7 +276,7 @@ function App() {
       })
       await loadAll()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка запроса SMS-кода')
+      setError(formatErrorMessage(err))
     }
   }
 
@@ -259,7 +295,7 @@ function App() {
       setPhoneAuthForm({ profile_id: '', phone: '', challenge_token: '', code: '', expire_date: '' })
       await loadAll()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка подтверждения SMS-кода')
+      setError(formatErrorMessage(err))
     }
   }
 
@@ -294,7 +330,25 @@ function App() {
       }
       await loadAll()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка удаления профиля')
+      setError(formatErrorMessage(err))
+    }
+  }
+
+  const loadProfileLogs = async (profileId) => {
+    if (!profileId) {
+      setSelectedProfileLogsId('')
+      setProfileLogs([])
+      return
+    }
+    try {
+      setProfileLogsLoading(true)
+      setSelectedProfileLogsId(String(profileId))
+      const data = await api(`/profiles/${profileId}/logs?limit=150`)
+      setProfileLogs(Array.isArray(data) ? data : [])
+    } catch (err) {
+      setError(formatErrorMessage(err))
+    } finally {
+      setProfileLogsLoading(false)
     }
   }
 
@@ -312,7 +366,7 @@ function App() {
       setRelayForm({ ...relayForm, name: '', url: '' })
       await loadAll()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка создания ретранслятора')
+      setError(formatErrorMessage(err))
     }
   }
 
@@ -334,7 +388,7 @@ function App() {
       setTelegramForm({ ...telegramForm, name: '', bot_token: '', chat_id: '', topic_id: '' })
       await loadAll()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка создания Telegram канала')
+      setError(formatErrorMessage(err))
     }
   }
 
@@ -346,7 +400,7 @@ function App() {
       })
       await loadAll()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка перезапуска задачи')
+      setError(formatErrorMessage(err))
     }
   }
 
@@ -508,6 +562,7 @@ function App() {
                         <button onClick={() => checkProfileAuth(profile.id)}>Проверить сессию</button>
                         <button onClick={() => startPhoneAuth(profile)}>Запросить SMS</button>
                         <button onClick={() => startEditProfile(profile)}>Редактировать</button>
+                        <button onClick={() => loadProfileLogs(profile.id)}>Auth-логи</button>
                         <button onClick={() => deleteProfile(profile.id)}>Удалить</button>
                       </div>
                     </td>
@@ -516,6 +571,28 @@ function App() {
               </tbody>
             </table>
           </div>
+
+          {selectedProfileLogsId ? (
+            <div className="table-wrap">
+              <h3>Auth-логи профиля #{selectedProfileLogsId}</h3>
+              {profileLogsLoading ? <p>Загрузка логов…</p> : null}
+              <table>
+                <thead><tr><th>ID</th><th>Level</th><th>Event</th><th>Сообщение</th><th>Context</th><th>Дата</th></tr></thead>
+                <tbody>
+                  {profileLogs.map((item) => (
+                    <tr key={item.id}>
+                      <td>{item.id}</td>
+                      <td>{item.level}</td>
+                      <td>{item.event}</td>
+                      <td>{item.message}</td>
+                      <td>{item.context ? JSON.stringify(item.context) : '-'}</td>
+                      <td>{item.created_at}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
         </section>
       )}
 
