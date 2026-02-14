@@ -74,7 +74,7 @@ services:
     image: nginx:1.27-alpine
     restart: unless-stopped
     ports:
-      - "${PROXY_HTTP_PORT:-80}:80"
+      - "${PROXY_HTTP_PORT:-90}:80"
     volumes:
       - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
       - ./deploy/nginx/certs:/etc/nginx/certs:ro
