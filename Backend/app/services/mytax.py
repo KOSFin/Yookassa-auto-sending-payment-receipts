@@ -419,7 +419,7 @@ class UnofficialMyTaxClient(MyTaxClient):
             raw = {'raw': response}
 
         receipt_uuid = str(raw.get('approvedReceiptUuid') or raw.get('receiptUuid') or raw.get('id') or payment_id)
-    receipt_url = str(raw.get('receiptUrl') or self._build_receipt_url(receipt_uuid))
+        receipt_url = str(raw.get('receiptUrl') or self._build_receipt_url(receipt_uuid))
         return MyTaxReceiptResult(receipt_uuid=receipt_uuid, receipt_url=receipt_url, raw=raw)
 
     async def cancel_receipt(self, receipt_uuid: str) -> dict:
