@@ -1,7 +1,9 @@
 $ErrorActionPreference = 'Stop'
 
-Write-Host 'Stopping orphan/old proxy container (if exists)...'
-docker compose rm -s -f proxy | Out-Null
+if ($env:FORCE_RESET_PROXY -eq '1') {
+	Write-Host 'Force-resetting proxy container...'
+	docker compose rm -s -f proxy | Out-Null
+}
 
 Write-Host 'Starting stack with rebuild...'
 $composeArgs = @('up', '-d', '--build', '--remove-orphans')

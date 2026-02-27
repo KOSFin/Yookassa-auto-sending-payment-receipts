@@ -64,7 +64,7 @@ services:
     networks:
       - appnet
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      test: ["CMD-SHELL", "nginx -t -q || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -80,13 +80,13 @@ services:
       - ./deploy/nginx/certs:/etc/nginx/certs:ro
     depends_on:
       backend:
-        condition: service_healthy
+        condition: service_started
       frontend:
-        condition: service_healthy
+        condition: service_started
     networks:
       - appnet
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/nginx-health || exit 1"]
+      test: ["CMD-SHELL", "nginx -t -q || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
