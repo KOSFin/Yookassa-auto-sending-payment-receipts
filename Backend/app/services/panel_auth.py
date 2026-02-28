@@ -33,7 +33,15 @@ def verify_credentials(login: str, password: str) -> bool:
     expected_password = _normalize_credential(settings.panel_password)
     actual_login = _normalize_credential(login)
     actual_password = _normalize_credential(password)
+    
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.warning(f"verify_credentials: expected_login_len={len(expected_login)}, actual_login_len={len(actual_login)}")
+    logger.warning(f"verify_credentials: expected_pass_len={len(expected_password)}, actual_pass_len={len(actual_password)}")
+    logger.warning(f"verify_credentials: login_match={hmac.compare_digest(actual_login, expected_login)}, pass_match={hmac.compare_digest(actual_password, expected_password)}")
+    
     if not expected_login or not expected_password:
+        logger.error("verify_credentials: expected credentials are empty")
         return False
     return hmac.compare_digest(actual_login, expected_login) and hmac.compare_digest(actual_password, expected_password)
 
