@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import Select, and_, func, select
+from sqlalchemy import Select, and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.models import (
     AppLog,
     MyTaxProfile,
+    MaintenanceSettings,
     PaymentEvent,
     Receipt,
     ReceiptStatus,
@@ -41,7 +42,12 @@ from app.schemas import (
     StoreOut,
     StoreUpdate,
     TelegramChannelCreate,
+    TelegramChannelUpdate,
     TelegramChannelOut,
+    TelegramTestMessageIn,
+    MaintenanceCleanupOut,
+    MaintenanceSettingsOut,
+    MaintenanceSettingsBase,
 )
 from app.services.mytax import (
     MyTaxApiError,
@@ -52,7 +58,7 @@ from app.services.mytax import (
     normalize_cookie_blob,
 )
 from app.services.relay import relay_notification
-from app.services.telegram import notify_store
+from app.services.telegram import notify_store, send_telegram_message
 from app.services.template import get_nested
 
 router = APIRouter()
@@ -170,6 +176,107 @@ async def _release_waiting_auth_tasks(db: AsyncSession, profile_id: int) -> int:
         task.error_message = ''
         task.next_retry_at = datetime.utcnow()
     return len(queued_tasks)
+
+
+async def _notify_auth_recovered(db: AsyncSession, profile_id: int, released_tasks: int) -> None:
+    if released_tasks <= 0:
+        return
+    stores_res = await db.execute(select(Store.id).where(Store.mytax_profile_id == profile_id))
+    store_ids = [store_id for (store_id,) in stores_res.all()]
+    for store_id in store_ids:
+        try:
+            await notify_store(
+                db,
+                store_id=store_id,
+                event_name='mytax_auth_recovered',
+                message=(
+                    'Авторизация Мой Налог восстановлена. '
+                    f'Задач из очереди возвращено в обработку: {released_tasks}.'
+                ),
+            )
+        except Exception:
+            continue
+
+
+async def _get_or_create_maintenance_settings(db: AsyncSession) -> MaintenanceSettings:
+    item = await db.get(MaintenanceSettings, 1)
+    if item is not None:
+        return item
+    item = MaintenanceSettings(id=1)
+    db.add(item)
+    await db.flush()
+    return item
+
+
+async def _delete_by_time_and_limit(
+    db: AsyncSession,
+    model,
+    id_column,
+    datetime_column,
+    retention_days: int,
+    keep_last: int,
+) -> int:
+    deleted_total = 0
+
+    if retention_days > 0:
+        cutoff = datetime.utcnow() - timedelta(days=retention_days)
+        res = await db.execute(delete(model).where(datetime_column < cutoff))
+        deleted_total += int(res.rowcount or 0)
+
+    if keep_last > 0:
+        threshold_res = await db.execute(
+            select(id_column).order_by(id_column.desc()).offset(keep_last - 1).limit(1)
+        )
+        threshold_id = threshold_res.scalar_one_or_none()
+        if threshold_id is not None:
+            res = await db.execute(delete(model).where(id_column < threshold_id))
+            deleted_total += int(res.rowcount or 0)
+
+    return deleted_total
+
+
+async def _run_cleanup(db: AsyncSession, settings: MaintenanceSettings) -> MaintenanceCleanupOut:
+    deleted_logs = await _delete_by_time_and_limit(
+        db,
+        AppLog,
+        AppLog.id,
+        AppLog.created_at,
+        settings.log_retention_days,
+        settings.keep_last_logs,
+    )
+    deleted_events = await _delete_by_time_and_limit(
+        db,
+        PaymentEvent,
+        PaymentEvent.id,
+        PaymentEvent.received_at,
+        settings.event_retention_days,
+        settings.keep_last_events,
+    )
+    deleted_queue = await _delete_by_time_and_limit(
+        db,
+        ReceiptTask,
+        ReceiptTask.id,
+        ReceiptTask.created_at,
+        settings.queue_retention_days,
+        settings.keep_last_queue,
+    )
+    deleted_receipts = await _delete_by_time_and_limit(
+        db,
+        Receipt,
+        Receipt.id,
+        Receipt.created_at,
+        settings.receipt_retention_days,
+        settings.keep_last_receipts,
+    )
+    settings.last_cleanup_at = datetime.utcnow()
+    await db.flush()
+    return MaintenanceCleanupOut(
+        deleted_logs=deleted_logs,
+        deleted_events=deleted_events,
+        deleted_queue=deleted_queue,
+        deleted_receipts=deleted_receipts,
+        ran_at=settings.last_cleanup_at,
+    )
 
 
 @router.get('/health')
@@ -356,6 +463,7 @@ async def login_profile(profile_id: int, payload: LoginProfileIn, db: AsyncSessi
             f'Возобновлено задач после авторизации: {released_tasks}',
             context={'profile_id': item.id, 'released_tasks': released_tasks},
         )
+        await _notify_auth_recovered(db, item.id, released_tasks)
     await db.commit()
     await db.refresh(item)
     return item
@@ -397,6 +505,8 @@ async def check_profile_auth(profile_id: int, db: AsyncSession = Depends(get_db)
             context={**_profile_auth_context(item), 'released_tasks': released},
         )
         await db.commit()
+        if released:
+            await _notify_auth_recovered(db, item.id, released)
         return ProfileAuthStatusOut(
             profile_id=item.id,
             is_authenticated=True,
@@ -519,6 +629,7 @@ async def verify_profile_phone_auth(
             f'Профиль {item.name} авторизован по телефону',
             context={**_profile_auth_context(item), 'phone': phone, 'user': user, 'released_tasks': released_tasks},
         )
+        await _notify_auth_recovered(db, item.id, released_tasks)
         await db.commit()
         await db.refresh(item)
         return item
@@ -605,6 +716,102 @@ async def create_telegram_channel(payload: TelegramChannelCreate, db: AsyncSessi
     await db.commit()
     await db.refresh(item)
     return item
+
+
+@router.put('/telegram-channels/{channel_id}', response_model=TelegramChannelOut)
+async def update_telegram_channel(
+    channel_id: int,
+    payload: TelegramChannelUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> TelegramChannel:
+    item = await db.get(TelegramChannel, channel_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail='Telegram channel not found')
+
+    store = await db.get(Store, payload.store_id)
+    if store is None:
+        raise HTTPException(status_code=404, detail='Store not found')
+
+    for key, value in payload.model_dump().items():
+        setattr(item, key, value)
+    await _create_log(
+        db,
+        'telegram_channel_updated',
+        f'Обновлён Telegram канал: {item.name}',
+        store_id=item.store_id,
+        context={'channel_id': item.id},
+    )
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+@router.post('/telegram-channels/{channel_id}/test')
+async def test_telegram_channel(
+    channel_id: int,
+    payload: TelegramTestMessageIn,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    item = await db.get(TelegramChannel, channel_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail='Telegram channel not found')
+
+    await send_telegram_message(
+        bot_token=item.bot_token,
+        chat_id=item.chat_id,
+        text=payload.text,
+        topic_id=item.topic_id,
+    )
+    await _create_log(
+        db,
+        'telegram_channel_test_sent',
+        f'Отправлено тестовое сообщение в Telegram канал: {item.name}',
+        store_id=item.store_id,
+        context={'channel_id': item.id},
+    )
+    await db.commit()
+    return {'status': 'sent'}
+
+
+@router.get('/maintenance/settings', response_model=MaintenanceSettingsOut)
+async def get_maintenance_settings(db: AsyncSession = Depends(get_db)) -> MaintenanceSettings:
+    item = await _get_or_create_maintenance_settings(db)
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+@router.put('/maintenance/settings', response_model=MaintenanceSettingsOut)
+async def update_maintenance_settings(
+    payload: MaintenanceSettingsBase,
+    db: AsyncSession = Depends(get_db),
+) -> MaintenanceSettings:
+    item = await _get_or_create_maintenance_settings(db)
+    for key, value in payload.model_dump().items():
+        setattr(item, key, value)
+    await _create_log(
+        db,
+        'maintenance_settings_updated',
+        'Обновлены настройки очистки БД',
+        context=payload.model_dump(),
+    )
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+@router.post('/maintenance/cleanup', response_model=MaintenanceCleanupOut)
+async def run_maintenance_cleanup(db: AsyncSession = Depends(get_db)) -> MaintenanceCleanupOut:
+    item = await _get_or_create_maintenance_settings(db)
+    result = await _run_cleanup(db, item)
+    await _create_log(
+        db,
+        'maintenance_cleanup_done',
+        'Выполнена очистка БД по настройкам',
+        context=result.model_dump(),
+    )
+    await db.commit()
+    return result
 
 
 @router.get('/events', response_model=list[PaymentEventOut])

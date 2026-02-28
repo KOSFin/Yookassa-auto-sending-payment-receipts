@@ -4,7 +4,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -12,6 +12,7 @@ from app.core.db import AsyncSessionLocal
 from app.models import (
     AppLog,
     EventStatus,
+    MaintenanceSettings,
     PaymentEvent,
     Receipt,
     ReceiptStatus,
@@ -47,8 +48,109 @@ async def _create_worker_log(
     )
 
 
+async def _get_or_create_maintenance_settings(db: AsyncSession) -> MaintenanceSettings:
+    item = await db.get(MaintenanceSettings, 1)
+    if item is not None:
+        return item
+    item = MaintenanceSettings(id=1)
+    db.add(item)
+    await db.flush()
+    return item
+
+
+async def _cleanup_by_rule(
+    db: AsyncSession,
+    model,
+    id_column,
+    datetime_column,
+    retention_days: int,
+    keep_last: int,
+) -> int:
+    deleted_total = 0
+    if retention_days > 0:
+        cutoff = datetime.utcnow() - timedelta(days=retention_days)
+        res = await db.execute(delete(model).where(datetime_column < cutoff))
+        deleted_total += int(res.rowcount or 0)
+
+    if keep_last > 0:
+        threshold_res = await db.execute(
+            select(id_column).order_by(id_column.desc()).offset(keep_last - 1).limit(1)
+        )
+        threshold_id = threshold_res.scalar_one_or_none()
+        if threshold_id is not None:
+            res = await db.execute(delete(model).where(id_column < threshold_id))
+            deleted_total += int(res.rowcount or 0)
+
+    return deleted_total
+
+
+async def process_cleanup_if_due(db: AsyncSession) -> None:
+    settings = await _get_or_create_maintenance_settings(db)
+    now = datetime.utcnow()
+    last = settings.last_cleanup_at
+    if last is not None:
+        delta_seconds = (now - last).total_seconds()
+        if delta_seconds < max(60, settings.cleanup_interval_minutes * 60):
+            return
+
+    deleted_logs = await _cleanup_by_rule(
+        db,
+        AppLog,
+        AppLog.id,
+        AppLog.created_at,
+        settings.log_retention_days,
+        settings.keep_last_logs,
+    )
+    deleted_events = await _cleanup_by_rule(
+        db,
+        PaymentEvent,
+        PaymentEvent.id,
+        PaymentEvent.received_at,
+        settings.event_retention_days,
+        settings.keep_last_events,
+    )
+    deleted_queue = await _cleanup_by_rule(
+        db,
+        ReceiptTask,
+        ReceiptTask.id,
+        ReceiptTask.created_at,
+        settings.queue_retention_days,
+        settings.keep_last_queue,
+    )
+    deleted_receipts = await _cleanup_by_rule(
+        db,
+        Receipt,
+        Receipt.id,
+        Receipt.created_at,
+        settings.receipt_retention_days,
+        settings.keep_last_receipts,
+    )
+
+    settings.last_cleanup_at = now
+    await _create_worker_log(
+        db,
+        'maintenance_cleanup_done',
+        'Worker выполнил автоочистку БД',
+        context={
+            'deleted_logs': deleted_logs,
+            'deleted_events': deleted_events,
+            'deleted_queue': deleted_queue,
+            'deleted_receipts': deleted_receipts,
+            'interval_minutes': settings.cleanup_interval_minutes,
+        },
+    )
+    logger.info(
+        'Cleanup done: logs=%s events=%s queue=%s receipts=%s',
+        deleted_logs,
+        deleted_events,
+        deleted_queue,
+        deleted_receipts,
+    )
+
+
 async def process_one_task() -> None:
     async with AsyncSessionLocal() as db:
+        await process_cleanup_if_due(db)
         query = (
             select(ReceiptTask)
             .where(
@@ -222,7 +324,25 @@ async def process_one_task() -> None:
                 db,
                 store_id=task.store_id,
                 event_name='mytax_auth_required',
-                message=f'MyTax re-authentication required: {exc}',
+                message=(
+                    f'Слетела авторизация Мой Налог: {exc}. '
+                    f'Задача по платежу {task.payment_id} переведена в ожидание и будет выполнена после входа.'
+                ),
+            )
+
+            waiting_count_q = select(func.count(ReceiptTask.id)).where(
+                ReceiptTask.store_id == task.store_id,
+                ReceiptTask.status == TaskStatus.WAITING_AUTH,
+            )
+            waiting_count = int((await db.execute(waiting_count_q)).scalar() or 0)
+            await notify_store(
+                db,
+                store_id=task.store_id,
+                event_name='mytax_auth_queue_waiting',
+                message=(
+                    'Чеки поставлены в очередь до повторной авторизации. '
+                    f'Сейчас в ожидании: {waiting_count}.'
+                ),
             )
 
         except MyTaxTransientError as exc:
@@ -252,6 +372,15 @@ async def process_one_task() -> None:
                 retry_seconds,
                 exc,
             )
+            await notify_store(
+                db,
+                store_id=task.store_id,
+                event_name='task_retry_scheduled',
+                message=(
+                    f'Временная ошибка Мой Налог для платежа {task.payment_id}. '
+                    f'Повтор через {retry_seconds} сек.'
+                ),
+            )
 
         except Exception as exc:
             if task.attempts >= task.max_attempts:
@@ -278,8 +407,26 @@ async def process_one_task() -> None:
             )
             if task.status == TaskStatus.FAILED:
                 logger.error('Task %s failed permanently: %s', task.id, exc)
+                await notify_store(
+                    db,
+                    store_id=task.store_id,
+                    event_name='receipt_failed',
+                    message=(
+                        f'Не удалось обработать чек по платежу {task.payment_id}: {exc}. '
+                        'Превышен лимит попыток.'
+                    ),
+                )
             else:
                 logger.warning('Task %s failed and was rescheduled: %s', task.id, exc)
+                await notify_store(
+                    db,
+                    store_id=task.store_id,
+                    event_name='task_retry_scheduled',
+                    message=(
+                        f'Ошибка обработки чека по платежу {task.payment_id}: {exc}. '
+                        'Задача будет повторена автоматически.'
+                    ),
+                )
 
         await db.commit()
 

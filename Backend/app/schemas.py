@@ -107,6 +107,10 @@ class TelegramChannelCreate(TelegramChannelBase):
     pass
 
 
+class TelegramChannelUpdate(TelegramChannelBase):
+    pass
+
+
 class TelegramChannelOut(TelegramChannelBase):
     id: int
 
@@ -196,6 +200,38 @@ class StatsOut(BaseModel):
     waiting_auth_tasks: int
     pending_tasks: int
     total_receipts: int
+
+
+class TelegramTestMessageIn(BaseModel):
+    text: str = 'Тестовое сообщение: Telegram канал подключён и работает.'
+
+
+class MaintenanceSettingsBase(BaseModel):
+    log_retention_days: int = Field(default=30, ge=0, le=3650)
+    event_retention_days: int = Field(default=30, ge=0, le=3650)
+    queue_retention_days: int = Field(default=30, ge=0, le=3650)
+    receipt_retention_days: int = Field(default=90, ge=0, le=3650)
+    keep_last_logs: int = Field(default=5000, ge=0, le=500000)
+    keep_last_events: int = Field(default=5000, ge=0, le=500000)
+    keep_last_queue: int = Field(default=5000, ge=0, le=500000)
+    keep_last_receipts: int = Field(default=5000, ge=0, le=500000)
+    cleanup_interval_minutes: int = Field(default=60, ge=1, le=10080)
+
+
+class MaintenanceSettingsOut(MaintenanceSettingsBase):
+    id: int
+    last_cleanup_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class MaintenanceCleanupOut(BaseModel):
+    deleted_logs: int
+    deleted_events: int
+    deleted_queue: int
+    deleted_receipts: int
+    ran_at: datetime
 
 
 class AppLogOut(BaseModel):

@@ -194,3 +194,24 @@ class AppLog(Base):
     message: Mapped[str] = mapped_column(Text, default='')
     context: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class MaintenanceSettings(Base):
+    __tablename__ = 'maintenance_settings'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    log_retention_days: Mapped[int] = mapped_column(Integer, default=30)
+    event_retention_days: Mapped[int] = mapped_column(Integer, default=30)
+    queue_retention_days: Mapped[int] = mapped_column(Integer, default=30)
+    receipt_retention_days: Mapped[int] = mapped_column(Integer, default=90)
+
+    keep_last_logs: Mapped[int] = mapped_column(Integer, default=5000)
+    keep_last_events: Mapped[int] = mapped_column(Integer, default=5000)
+    keep_last_queue: Mapped[int] = mapped_column(Integer, default=5000)
+    keep_last_receipts: Mapped[int] = mapped_column(Integer, default=5000)
+
+    cleanup_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
+    last_cleanup_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -13,6 +13,40 @@ const tabs = [
   { id: 'queue', label: 'Очередь' },
   { id: 'receipts', label: 'Чеки' },
   { id: 'logs', label: 'Логи' },
+  { id: 'maintenance', label: 'Обслуживание' },
+]
+
+const sectionHints = {
+  overview: 'Общая картина по системе: события, очередь, чеки и ошибки по текущим фильтрам.',
+  stores: 'Настройка магазина определяет, как читать webhook и как формировать чек/ретрансляцию.',
+  profiles: 'Профили Мой Налог используются для выдачи чеков. При потере сессии задачи уходят в ожидание.',
+  relay: 'Ретранслятор отправляет webhook в ваши внешние системы (CRM, бэк, BI) с опциональными изменениями.',
+  telegram: 'Telegram-боты отправляют уведомления по выбранным событиям и помогают быстро отслеживать проблемы.',
+  events: 'Журнал входящих webhook-событий YooKassa и статус их обработки.',
+  queue: 'Очередь задач создания/отмены чеков с повторами и диагностикой ошибок.',
+  receipts: 'Сформированные чеки и ссылки на них.',
+  logs: 'Технические логи приложения для разбора проблем и аудита действий.',
+  maintenance: 'Настройки очистки БД от старых/лишних данных, чтобы база не разрасталась мусором.',
+}
+
+const telegramEventOptions = [
+  { key: 'payment_received', title: 'Платёж получен', hint: 'Получен webhook об успешной оплате или ожидании capture.' },
+  { key: 'refund_received', title: 'Возврат получен', hint: 'Пришёл webhook о возврате/отмене платежа.' },
+  { key: 'receipt_created', title: 'Чек создан', hint: 'Чек успешно создан в Мой Налог.' },
+  { key: 'receipt_canceled', title: 'Чек отменён', hint: 'Чек успешно отменён в Мой Налог.' },
+  { key: 'mytax_auth_required', title: 'Нужна переавторизация', hint: 'Авторизация в Мой Налог слетела, обработка временно остановлена.' },
+  { key: 'mytax_auth_queue_waiting', title: 'Чеки в ожидании авторизации', hint: 'Задачи ушли в очередь WAITING_AUTH и ждут повторного входа.' },
+  { key: 'mytax_auth_recovered', title: 'Авторизация восстановлена', hint: 'Доступ восстановлен, очередь снова обрабатывается.' },
+  { key: 'task_retry_scheduled', title: 'Назначен повтор задачи', hint: 'Временная ошибка, задача будет повторена автоматически.' },
+  { key: 'receipt_failed', title: 'Чек не удалось сформировать', hint: 'Превышен лимит попыток, нужна ручная проверка.' },
+]
+
+const templateVariables = [
+  { key: '{{payment_id}}', hint: 'ID платежа из webhook.' },
+  { key: '{{amount}}', hint: 'Сумма из поля amount_path.' },
+  { key: '{{customer_name}}', hint: 'Имя клиента по customer_name_path.' },
+  { key: '{{event}}', hint: 'Имя события, например payment.succeeded.' },
+  { key: '{{payload.object.id}}', hint: 'Доступ к исходному payload webhook.' },
 ]
 
 const emptyProfileForm = {
@@ -25,6 +59,29 @@ const emptyProfileForm = {
   access_token: '',
   refresh_token: '',
   cookie_blob: '',
+}
+
+const emptyTelegramForm = {
+  store_id: '',
+  name: '',
+  bot_token: '',
+  chat_id: '',
+  topic_id: '',
+  events_json: ['payment_received', 'receipt_created', 'receipt_canceled', 'mytax_auth_required'],
+  include_receipt_url: true,
+  is_active: true,
+}
+
+const emptyMaintenance = {
+  log_retention_days: 30,
+  event_retention_days: 30,
+  queue_retention_days: 30,
+  receipt_retention_days: 90,
+  keep_last_logs: 5000,
+  keep_last_events: 5000,
+  keep_last_queue: 5000,
+  keep_last_receipts: 5000,
+  cleanup_interval_minutes: 60,
 }
 
 async function api(path, options = {}) {
@@ -49,38 +106,38 @@ async function api(path, options = {}) {
     }
     throw new Error(message)
   }
-  return response.json()
-}
-
-function parseApiErrorPayload(error) {
-  if (!(error instanceof Error)) return null
-  const raw = (error.message || '').trim()
-  if (!raw) return null
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return null
-  }
+  return response.status === 204 ? {} : response.json()
 }
 
 function formatErrorMessage(error) {
-  if (!(error instanceof Error)) {
-    return 'Неизвестная ошибка'
-  }
+  if (!(error instanceof Error)) return 'Неизвестная ошибка'
   const raw = (error.message || '').trim()
   if (!raw) return 'Неизвестная ошибка'
   try {
     const parsed = JSON.parse(raw)
-    if (parsed?.detail && typeof parsed.detail === 'string') {
-      return parsed.detail
-    }
-    if (parsed?.message && typeof parsed.message === 'string') {
-      return parsed.message
-    }
+    if (parsed?.detail && typeof parsed.detail === 'string') return parsed.detail
+    if (parsed?.message && typeof parsed.message === 'string') return parsed.message
     return JSON.stringify(parsed)
   } catch {
     return raw
   }
+}
+
+function AsyncButton({ loading, idleText, loadingText, ...props }) {
+  return (
+    <button {...props} disabled={loading || props.disabled}>
+      {loading ? loadingText : idleText}
+    </button>
+  )
+}
+
+function SectionHint({ text }) {
+  return <div className="section-hint">{text}</div>
+}
+
+function InlineError({ message }) {
+  if (!message) return null
+  return <div className="inline-error">{message}</div>
 }
 
 function App() {
@@ -94,12 +151,20 @@ function App() {
   const [receipts, setReceipts] = useState([])
   const [logs, setLogs] = useState([])
   const [stats, setStats] = useState(null)
+
   const [selectedStoreId, setSelectedStoreId] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
+  const [globalError, setGlobalError] = useState('')
+  const [inlineErrors, setInlineErrors] = useState({})
+  const [actionLoading, setActionLoading] = useState({})
+  const [toast, setToast] = useState({ type: '', message: '' })
+
   const [editingProfileId, setEditingProfileId] = useState(null)
+  const [editingTelegramId, setEditingTelegramId] = useState(null)
+
   const [phoneAuthForm, setPhoneAuthForm] = useState({
     profile_id: '',
     phone: '',
@@ -107,6 +172,7 @@ function App() {
     code: '',
     expire_date: '',
   })
+
   const [logsSearch, setLogsSearch] = useState('')
   const [selectedProfileLogsId, setSelectedProfileLogsId] = useState('')
   const [profileLogs, setProfileLogs] = useState([])
@@ -140,16 +206,9 @@ function App() {
     is_active: true,
   })
 
-  const [telegramForm, setTelegramForm] = useState({
-    store_id: '',
-    name: '',
-    bot_token: '',
-    chat_id: '',
-    topic_id: '',
-    events_json: 'payment_received,receipt_created,receipt_canceled,mytax_auth_required',
-    include_receipt_url: true,
-    is_active: true,
-  })
+  const [telegramForm, setTelegramForm] = useState(emptyTelegramForm)
+  const [maintenanceSettings, setMaintenanceSettings] = useState(emptyMaintenance)
+  const [lastCleanupResult, setLastCleanupResult] = useState(null)
 
   const querySuffix = useMemo(() => {
     const params = new URLSearchParams()
@@ -168,9 +227,35 @@ function App() {
     return q ? `?${q}` : ''
   }, [selectedStoreId, logsSearch])
 
+  const setActionState = (key, value) => setActionLoading((prev) => ({ ...prev, [key]: value }))
+
+  const setErrorFor = (key, message) => setInlineErrors((prev) => ({ ...prev, [key]: message }))
+
+  const clearErrorFor = (key) => setInlineErrors((prev) => ({ ...prev, [key]: '' }))
+
+  const showToast = (type, message) => {
+    setToast({ type, message })
+    window.setTimeout(() => setToast({ type: '', message: '' }), 3500)
+  }
+
+  const runAction = async (key, fn, successMessage = '') => {
+    setActionState(key, true)
+    clearErrorFor(key)
+    try {
+      await fn()
+      if (successMessage) showToast('success', successMessage)
+    } catch (err) {
+      const message = formatErrorMessage(err)
+      setErrorFor(key, message)
+      showToast('error', message)
+    } finally {
+      setActionState(key, false)
+    }
+  }
+
   const loadAll = async () => {
     setLoading(true)
-    setError('')
+    setGlobalError('')
     try {
       const [
         storesRes,
@@ -182,6 +267,7 @@ function App() {
         receiptsRes,
         logsRes,
         statsRes,
+        maintenanceRes,
       ] = await Promise.all([
         api('/stores'),
         api('/profiles'),
@@ -192,6 +278,7 @@ function App() {
         api(`/receipts${querySuffix}`),
         api(`/logs${logsQuerySuffix}`),
         api(`/stats${querySuffix}`),
+        api('/maintenance/settings'),
       ])
       setStores(storesRes)
       setProfiles(profilesRes)
@@ -202,8 +289,19 @@ function App() {
       setReceipts(receiptsRes)
       setLogs(logsRes)
       setStats(statsRes)
+      setMaintenanceSettings({
+        log_retention_days: maintenanceRes.log_retention_days,
+        event_retention_days: maintenanceRes.event_retention_days,
+        queue_retention_days: maintenanceRes.queue_retention_days,
+        receipt_retention_days: maintenanceRes.receipt_retention_days,
+        keep_last_logs: maintenanceRes.keep_last_logs,
+        keep_last_events: maintenanceRes.keep_last_events,
+        keep_last_queue: maintenanceRes.keep_last_queue,
+        keep_last_receipts: maintenanceRes.keep_last_receipts,
+        cleanup_interval_minutes: maintenanceRes.cleanup_interval_minutes,
+      })
     } catch (err) {
-      setError(formatErrorMessage(err))
+      setGlobalError(formatErrorMessage(err))
     } finally {
       setLoading(false)
     }
@@ -215,110 +313,108 @@ function App() {
 
   const createStore = async (event) => {
     event.preventDefault()
-    try {
-      await api('/stores', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...storeForm,
-          relay_retry_limit: Number(storeForm.relay_retry_limit),
-          mytax_profile_id: storeForm.mytax_profile_id ? Number(storeForm.mytax_profile_id) : null,
-        }),
-      })
-      setStoreForm({ ...storeForm, name: '', webhook_path: '' })
-      await loadAll()
-    } catch (err) {
-      setError(formatErrorMessage(err))
-    }
+    await runAction(
+      'storeForm',
+      async () => {
+        await api('/stores', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...storeForm,
+            relay_retry_limit: Number(storeForm.relay_retry_limit),
+            mytax_profile_id: storeForm.mytax_profile_id ? Number(storeForm.mytax_profile_id) : null,
+          }),
+        })
+        setStoreForm({ ...storeForm, name: '', webhook_path: '' })
+        await loadAll()
+      },
+      'Магазин сохранён',
+    )
   }
 
   const createProfile = async (event) => {
     event.preventDefault()
-    try {
-      await api(editingProfileId ? `/profiles/${editingProfileId}` : '/profiles', {
-        method: editingProfileId ? 'PUT' : 'POST',
-        body: JSON.stringify(profileForm),
-      })
-      setProfileForm(emptyProfileForm)
-      setEditingProfileId(null)
-      await loadAll()
-    } catch (err) {
-      setError(formatErrorMessage(err))
-    }
+    await runAction(
+      'profileForm',
+      async () => {
+        await api(editingProfileId ? `/profiles/${editingProfileId}` : '/profiles', {
+          method: editingProfileId ? 'PUT' : 'POST',
+          body: JSON.stringify(profileForm),
+        })
+        setProfileForm(emptyProfileForm)
+        setEditingProfileId(null)
+        await loadAll()
+      },
+      editingProfileId ? 'Профиль обновлён' : 'Профиль сохранён',
+    )
   }
 
   const loginProfile = async (profileId) => {
-    try {
-      await api(`/profiles/${profileId}/login`, {
-        method: 'POST',
-        body: JSON.stringify({ force: true }),
-      })
-      await loadAll()
-    } catch (err) {
-      setError(formatErrorMessage(err))
-    }
+    await runAction(
+      `profileLogin:${profileId}`,
+      async () => {
+        await api(`/profiles/${profileId}/login`, {
+          method: 'POST',
+          body: JSON.stringify({ force: true }),
+        })
+        await loadAll()
+      },
+      'Проверка авторизации выполнена',
+    )
   }
 
   const checkProfileAuth = async (profileId) => {
-    try {
-      const result = await api(`/profiles/${profileId}/auth/check`, {
-        method: 'POST',
-      })
-      if (!result.is_authenticated) {
-        setError(result.message || 'Проверка авторизации неуспешна')
-      }
-      await loadAll()
-    } catch (err) {
-      setError(formatErrorMessage(err))
-    }
+    await runAction(
+      `profileCheck:${profileId}`,
+      async () => {
+        const result = await api(`/profiles/${profileId}/auth/check`, { method: 'POST' })
+        if (!result.is_authenticated) {
+          throw new Error(result.message || 'Проверка авторизации неуспешна')
+        }
+        await loadAll()
+      },
+      'Сессия профиля активна',
+    )
   }
 
   const startPhoneAuth = async (profile) => {
-    try {
-      const result = await api(`/profiles/${profile.id}/auth/phone/start`, {
-        method: 'POST',
-        body: JSON.stringify({ phone: profile.phone || profileForm.phone || '' }),
-      })
-      setPhoneAuthForm({
-        profile_id: String(profile.id),
-        phone: result.phone || profile.phone || '',
-        challenge_token: result.challengeToken || '',
-        code: '',
-        expire_date: result.expireDate || '',
-      })
-      await loadAll()
-    } catch (err) {
-      const payload = parseApiErrorPayload(err)
-      const detail = payload?.detail
-      if (detail && typeof detail === 'object' && detail.can_verify) {
-        setPhoneAuthForm((prev) => ({
+    await runAction(
+      `profileSmsStart:${profile.id}`,
+      async () => {
+        const result = await api(`/profiles/${profile.id}/auth/phone/start`, {
+          method: 'POST',
+          body: JSON.stringify({ phone: profile.phone || profileForm.phone || '' }),
+        })
+        setPhoneAuthForm({
           profile_id: String(profile.id),
-          phone: String(detail.phone || profile.phone || ''),
-          challenge_token: String(detail.additionalInfo?.challengeToken || prev.challenge_token || ''),
+          phone: result.phone || profile.phone || '',
+          challenge_token: result.challengeToken || '',
           code: '',
-          expire_date: String(detail.additionalInfo?.expireDate || prev.expire_date || ''),
-        }))
-      }
-      setError(formatErrorMessage(err))
-    }
+          expire_date: result.expireDate || '',
+        })
+      },
+      'SMS challenge запрошен',
+    )
   }
 
   const verifyPhoneAuth = async (event) => {
     event.preventDefault()
     if (!phoneAuthForm.profile_id) return
-    try {
-      await api(`/profiles/${phoneAuthForm.profile_id}/auth/phone/verify`, {
-        method: 'POST',
-        body: JSON.stringify({
-          phone: phoneAuthForm.phone,
-          challenge_token: phoneAuthForm.challenge_token,
-          code: phoneAuthForm.code,
-        }),
-      })
-      setPhoneAuthForm({ profile_id: '', phone: '', challenge_token: '', code: '', expire_date: '' })
-      await loadAll()
-    } catch (err) {
-      setError(formatErrorMessage(err))
-    }
+    await runAction(
+      'profileSmsVerify',
+      async () => {
+        await api(`/profiles/${phoneAuthForm.profile_id}/auth/phone/verify`, {
+          method: 'POST',
+          body: JSON.stringify({
+            phone: phoneAuthForm.phone,
+            challenge_token: phoneAuthForm.challenge_token,
+            code: phoneAuthForm.code,
+          }),
+        })
+        setPhoneAuthForm({ profile_id: '', phone: '', challenge_token: '', code: '', expire_date: '' })
+        await loadAll()
+      },
+      'Телефонная авторизация подтверждена',
+    )
   }
 
   const startEditProfile = (profile) => {
@@ -342,18 +438,18 @@ function App() {
   }
 
   const deleteProfile = async (profileId) => {
-    try {
-      await api(`/profiles/${profileId}`, { method: 'DELETE' })
-      if (editingProfileId === profileId) {
-        cancelProfileEdit()
-      }
-      if (String(phoneAuthForm.profile_id) === String(profileId)) {
-        setPhoneAuthForm({ profile_id: '', phone: '', challenge_token: '', code: '', expire_date: '' })
-      }
-      await loadAll()
-    } catch (err) {
-      setError(formatErrorMessage(err))
-    }
+    await runAction(
+      `profileDelete:${profileId}`,
+      async () => {
+        await api(`/profiles/${profileId}`, { method: 'DELETE' })
+        if (editingProfileId === profileId) cancelProfileEdit()
+        if (String(phoneAuthForm.profile_id) === String(profileId)) {
+          setPhoneAuthForm({ profile_id: '', phone: '', challenge_token: '', code: '', expire_date: '' })
+        }
+        await loadAll()
+      },
+      'Профиль удалён',
+    )
   }
 
   const loadProfileLogs = async (profileId) => {
@@ -362,68 +458,156 @@ function App() {
       setProfileLogs([])
       return
     }
-    try {
+    await runAction(`profileLogs:${profileId}`, async () => {
       setProfileLogsLoading(true)
-      setSelectedProfileLogsId(String(profileId))
-      const data = await api(`/profiles/${profileId}/logs?limit=150`)
-      setProfileLogs(Array.isArray(data) ? data : [])
-    } catch (err) {
-      setError(formatErrorMessage(err))
-    } finally {
-      setProfileLogsLoading(false)
-    }
+      try {
+        setSelectedProfileLogsId(String(profileId))
+        const data = await api(`/profiles/${profileId}/logs?limit=150`)
+        setProfileLogs(Array.isArray(data) ? data : [])
+      } finally {
+        setProfileLogsLoading(false)
+      }
+    })
   }
 
   const createRelayTarget = async (event) => {
     event.preventDefault()
-    try {
-      await api('/relay-targets', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...relayForm,
-          store_id: Number(relayForm.store_id),
-          headers_json: relayForm.headers_json ? JSON.parse(relayForm.headers_json) : {},
-        }),
-      })
-      setRelayForm({ ...relayForm, name: '', url: '' })
-      await loadAll()
-    } catch (err) {
-      setError(formatErrorMessage(err))
-    }
+    await runAction(
+      'relayForm',
+      async () => {
+        await api('/relay-targets', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...relayForm,
+            store_id: Number(relayForm.store_id),
+            headers_json: relayForm.headers_json ? JSON.parse(relayForm.headers_json) : {},
+          }),
+        })
+        setRelayForm({ ...relayForm, name: '', url: '' })
+        await loadAll()
+      },
+      'Ретранслятор сохранён',
+    )
   }
 
-  const createTelegramChannel = async (event) => {
+  const toggleTelegramEvent = (eventName) => {
+    setTelegramForm((prev) => {
+      const current = new Set(prev.events_json)
+      if (current.has(eventName)) {
+        current.delete(eventName)
+      } else {
+        current.add(eventName)
+      }
+      return { ...prev, events_json: [...current] }
+    })
+  }
+
+  const startEditTelegram = (channel) => {
+    setEditingTelegramId(channel.id)
+    setTelegramForm({
+      store_id: String(channel.store_id),
+      name: channel.name || '',
+      bot_token: channel.bot_token || '',
+      chat_id: channel.chat_id || '',
+      topic_id: channel.topic_id ? String(channel.topic_id) : '',
+      events_json: Array.isArray(channel.events_json) ? channel.events_json : [],
+      include_receipt_url: Boolean(channel.include_receipt_url),
+      is_active: Boolean(channel.is_active),
+    })
+  }
+
+  const cancelTelegramEdit = () => {
+    setEditingTelegramId(null)
+    setTelegramForm(emptyTelegramForm)
+  }
+
+  const saveTelegramChannel = async (event) => {
     event.preventDefault()
-    try {
-      await api('/telegram-channels', {
-        method: 'POST',
-        body: JSON.stringify({
+    await runAction(
+      'telegramForm',
+      async () => {
+        const payload = {
           ...telegramForm,
           store_id: Number(telegramForm.store_id),
           topic_id: telegramForm.topic_id ? Number(telegramForm.topic_id) : null,
-          events_json: telegramForm.events_json
-            .split(',')
-            .map((item) => item.trim())
-            .filter(Boolean),
-        }),
-      })
-      setTelegramForm({ ...telegramForm, name: '', bot_token: '', chat_id: '', topic_id: '' })
-      await loadAll()
-    } catch (err) {
-      setError(formatErrorMessage(err))
-    }
+          events_json: telegramForm.events_json,
+        }
+        await api(editingTelegramId ? `/telegram-channels/${editingTelegramId}` : '/telegram-channels', {
+          method: editingTelegramId ? 'PUT' : 'POST',
+          body: JSON.stringify(payload),
+        })
+        setTelegramForm(emptyTelegramForm)
+        setEditingTelegramId(null)
+        await loadAll()
+      },
+      editingTelegramId ? 'Telegram-бот обновлён' : 'Telegram-бот создан',
+    )
+  }
+
+  const sendTelegramTest = async (channelId) => {
+    await runAction(
+      `telegramTest:${channelId}`,
+      async () => {
+        await api(`/telegram-channels/${channelId}/test`, {
+          method: 'POST',
+          body: JSON.stringify({
+            text: 'Тест: канал работает. Это проверочное уведомление из панели YooKassa Auto.',
+          }),
+        })
+      },
+      'Тестовое сообщение отправлено',
+    )
   }
 
   const retryTask = async (taskId) => {
-    try {
-      await api('/queue/retry', {
-        method: 'POST',
-        body: JSON.stringify({ task_id: taskId }),
-      })
-      await loadAll()
-    } catch (err) {
-      setError(formatErrorMessage(err))
-    }
+    await runAction(
+      `retryTask:${taskId}`,
+      async () => {
+        await api('/queue/retry', {
+          method: 'POST',
+          body: JSON.stringify({ task_id: taskId }),
+        })
+        await loadAll()
+      },
+      'Задача поставлена на повтор',
+    )
+  }
+
+  const saveMaintenanceSettings = async (event) => {
+    event.preventDefault()
+    await runAction(
+      'maintenanceSettings',
+      async () => {
+        await api('/maintenance/settings', {
+          method: 'PUT',
+          body: JSON.stringify({
+            ...maintenanceSettings,
+            log_retention_days: Number(maintenanceSettings.log_retention_days),
+            event_retention_days: Number(maintenanceSettings.event_retention_days),
+            queue_retention_days: Number(maintenanceSettings.queue_retention_days),
+            receipt_retention_days: Number(maintenanceSettings.receipt_retention_days),
+            keep_last_logs: Number(maintenanceSettings.keep_last_logs),
+            keep_last_events: Number(maintenanceSettings.keep_last_events),
+            keep_last_queue: Number(maintenanceSettings.keep_last_queue),
+            keep_last_receipts: Number(maintenanceSettings.keep_last_receipts),
+            cleanup_interval_minutes: Number(maintenanceSettings.cleanup_interval_minutes),
+          }),
+        })
+      },
+      'Настройки очистки сохранены',
+    )
+  }
+
+  const runCleanupNow = async () => {
+    await runAction(
+      'maintenanceCleanup',
+      async () => {
+        const result = await api('/maintenance/cleanup', { method: 'POST', body: '{}' })
+        setLastCleanupResult(result)
+        await loadAll()
+      },
+      'Очистка выполнена',
+    )
   }
 
   return (
@@ -433,7 +617,12 @@ function App() {
           <h1>YooKassa Auto MyTax Relay</h1>
           <p>Авто-чек в «Мой налог», очередь, ретрансляция вебхуков, Telegram-уведомления</p>
         </div>
-        <button onClick={loadAll} disabled={loading}>{loading ? 'Обновление…' : 'Обновить'}</button>
+        <AsyncButton
+          onClick={loadAll}
+          loading={loading}
+          idleText="Обновить"
+          loadingText="Обновление…"
+        />
       </header>
 
       <section className="filters">
@@ -456,7 +645,7 @@ function App() {
         </label>
       </section>
 
-      {error ? <div className="error">{error}</div> : null}
+      {globalError ? <div className="error">{globalError}</div> : null}
 
       <nav className="tabs">
         {tabs.map((tab) => (
@@ -469,6 +658,8 @@ function App() {
           </button>
         ))}
       </nav>
+
+      <SectionHint text={sectionHints[activeTab]} />
 
       {activeTab === 'overview' && stats && (
         <section className="grid cols-3">
@@ -485,25 +676,76 @@ function App() {
         <section className="stack">
           <form className="form" onSubmit={createStore}>
             <h2>Добавить магазин</h2>
+            <p className="subtle">Параметры ниже управляют тем, как система извлекает данные из webhook и формирует текст чека.</p>
             <div className="grid cols-2">
               <input placeholder="Название" value={storeForm.name} onChange={(e) => setStoreForm({ ...storeForm, name: e.target.value })} required />
               <input placeholder="Webhook path (например shop-a)" value={storeForm.webhook_path} onChange={(e) => setStoreForm({ ...storeForm, webhook_path: e.target.value })} required />
-              <select value={storeForm.relay_mode} onChange={(e) => setStoreForm({ ...storeForm, relay_mode: e.target.value })}>
-                <option value="fire_and_forget">fire_and_forget</option>
-                <option value="retry_until_200">retry_until_200</option>
-              </select>
-              <input type="number" min="1" value={storeForm.relay_retry_limit} onChange={(e) => setStoreForm({ ...storeForm, relay_retry_limit: e.target.value })} />
-              <input placeholder="Шаблон описания" value={storeForm.description_template} onChange={(e) => setStoreForm({ ...storeForm, description_template: e.target.value })} />
-              <select value={storeForm.mytax_profile_id ?? ''} onChange={(e) => setStoreForm({ ...storeForm, mytax_profile_id: e.target.value || null })}>
-                <option value="">Без профиля</option>
-                {profiles.map((profile) => (
-                  <option key={profile.id} value={profile.id}>{profile.name}</option>
-                ))}
-              </select>
+
+              <label>
+                Режим ретрансляции
+                <select value={storeForm.relay_mode} onChange={(e) => setStoreForm({ ...storeForm, relay_mode: e.target.value })}>
+                  <option value="fire_and_forget">fire_and_forget</option>
+                  <option value="retry_until_200">retry_until_200</option>
+                </select>
+                <small>fire_and_forget — без ожидания 200; retry_until_200 — повтор до успеха.</small>
+              </label>
+
+              <label>
+                Лимит повторов ретрансляции
+                <input type="number" min="1" value={storeForm.relay_retry_limit} onChange={(e) => setStoreForm({ ...storeForm, relay_retry_limit: e.target.value })} />
+                <small>Сколько раз повторять отправку в режиме retry_until_200.</small>
+              </label>
+
+              <label>
+                Шаблон описания
+                <input placeholder="Например: Оплата заказа {{payment_id}}" value={storeForm.description_template} onChange={(e) => setStoreForm({ ...storeForm, description_template: e.target.value })} />
+                <small>Текст для описания чека. Можно использовать переменные ниже.</small>
+              </label>
+
+              <label>
+                Профиль Мой Налог
+                <select value={storeForm.mytax_profile_id ?? ''} onChange={(e) => setStoreForm({ ...storeForm, mytax_profile_id: e.target.value || null })}>
+                  <option value="">Без профиля</option>
+                  {profiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>{profile.name}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label>
+                amount_path
+                <input value={storeForm.amount_path} onChange={(e) => setStoreForm({ ...storeForm, amount_path: e.target.value })} />
+                <small>Путь к сумме в payload YooKassa (например object.amount.value).</small>
+              </label>
+              <label>
+                payment_id_path
+                <input value={storeForm.payment_id_path} onChange={(e) => setStoreForm({ ...storeForm, payment_id_path: e.target.value })} />
+                <small>Путь к ID платежа.</small>
+              </label>
+              <label>
+                customer_name_path
+                <input value={storeForm.customer_name_path} onChange={(e) => setStoreForm({ ...storeForm, customer_name_path: e.target.value })} />
+                <small>Путь к имени клиента (если есть в metadata).</small>
+              </label>
             </div>
-            <label className="inline"><input type="checkbox" checked={storeForm.include_receipt_url_in_relay} onChange={(e) => setStoreForm({ ...storeForm, include_receipt_url_in_relay: e.target.checked })} />Добавлять ссылку на чек в ретрансляцию</label>
-            <label className="inline"><input type="checkbox" checked={storeForm.auto_cancel_on_refund} onChange={(e) => setStoreForm({ ...storeForm, auto_cancel_on_refund: e.target.checked })} />Авто-отмена чека при возврате</label>
-            <button type="submit">Сохранить магазин</button>
+
+            <div className="variables-row">
+              {templateVariables.map((item) => (
+                <span key={item.key} className="var-chip" title={item.hint}>{item.key}</span>
+              ))}
+            </div>
+
+            <label className="inline">
+              <input type="checkbox" checked={storeForm.include_receipt_url_in_relay} onChange={(e) => setStoreForm({ ...storeForm, include_receipt_url_in_relay: e.target.checked })} />
+              Добавлять ссылку на чек в ретрансляцию
+            </label>
+            <label className="inline">
+              <input type="checkbox" checked={storeForm.auto_cancel_on_refund} onChange={(e) => setStoreForm({ ...storeForm, auto_cancel_on_refund: e.target.checked })} />
+              Авто-отмена чека при возврате
+            </label>
+
+            <InlineError message={inlineErrors.storeForm} />
+            <AsyncButton type="submit" loading={actionLoading.storeForm} idleText="Сохранить магазин" loadingText="Сохранение…" />
           </form>
 
           <div className="table-wrap">
@@ -530,6 +772,7 @@ function App() {
         <section className="stack">
           <form className="form" onSubmit={createProfile}>
             <h2>{editingProfileId ? 'Редактировать профиль «Мой налог»' : 'Добавить профиль «Мой налог»'}</h2>
+            <p className="subtle">Если авторизация слетит, задачи попадут в WAITING_AUTH и автоматически продолжатся после входа.</p>
             <div className="grid cols-2">
               <input placeholder="Название" value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} required />
               <select value={profileForm.provider} onChange={(e) => setProfileForm({ ...profileForm, provider: e.target.value })}>
@@ -544,8 +787,9 @@ function App() {
               <input placeholder="refresh_token" value={profileForm.refresh_token} onChange={(e) => setProfileForm({ ...profileForm, refresh_token: e.target.value })} />
               <input placeholder="cookie_blob" value={profileForm.cookie_blob} onChange={(e) => setProfileForm({ ...profileForm, cookie_blob: e.target.value })} />
             </div>
+            <InlineError message={inlineErrors.profileForm} />
             <div className="actions-row">
-              <button type="submit">{editingProfileId ? 'Сохранить изменения' : 'Сохранить профиль'}</button>
+              <AsyncButton type="submit" loading={actionLoading.profileForm} idleText={editingProfileId ? 'Сохранить изменения' : 'Сохранить профиль'} loadingText="Сохранение…" />
               {editingProfileId ? <button type="button" onClick={cancelProfileEdit}>Отмена</button> : null}
             </div>
           </form>
@@ -560,8 +804,9 @@ function App() {
                 <input placeholder="Код из SMS" value={phoneAuthForm.code} onChange={(e) => setPhoneAuthForm({ ...phoneAuthForm, code: e.target.value })} required />
               </div>
               <p>Срок действия challenge: {phoneAuthForm.expire_date || 'неизвестно'}</p>
+              <InlineError message={inlineErrors.profileSmsVerify} />
               <div className="actions-row">
-                <button type="submit">Подтвердить код</button>
+                <AsyncButton type="submit" loading={actionLoading.profileSmsVerify} idleText="Подтвердить код" loadingText="Проверка…" />
                 <button type="button" onClick={() => setPhoneAuthForm({ profile_id: '', phone: '', challenge_token: '', code: '', expire_date: '' })}>Отмена</button>
               </div>
             </form>
@@ -580,12 +825,12 @@ function App() {
                     <td>{profile.last_error || '-'}</td>
                     <td>
                       <div className="actions-row">
-                        <button onClick={() => loginProfile(profile.id)}>Войти/переавторизовать</button>
-                        <button onClick={() => checkProfileAuth(profile.id)}>Проверить сессию</button>
-                        <button onClick={() => startPhoneAuth(profile)}>Запросить SMS</button>
+                        <AsyncButton onClick={() => loginProfile(profile.id)} loading={actionLoading[`profileLogin:${profile.id}`]} idleText="Войти/переавторизовать" loadingText="Проверка…" />
+                        <AsyncButton onClick={() => checkProfileAuth(profile.id)} loading={actionLoading[`profileCheck:${profile.id}`]} idleText="Проверить сессию" loadingText="Проверка…" />
+                        <AsyncButton onClick={() => startPhoneAuth(profile)} loading={actionLoading[`profileSmsStart:${profile.id}`]} idleText="Запросить SMS" loadingText="Отправка…" />
                         <button onClick={() => startEditProfile(profile)}>Редактировать</button>
-                        <button onClick={() => loadProfileLogs(profile.id)}>Auth-логи</button>
-                        <button onClick={() => deleteProfile(profile.id)}>Удалить</button>
+                        <AsyncButton onClick={() => loadProfileLogs(profile.id)} loading={actionLoading[`profileLogs:${profile.id}`]} idleText="Auth-логи" loadingText="Загрузка…" />
+                        <AsyncButton onClick={() => deleteProfile(profile.id)} loading={actionLoading[`profileDelete:${profile.id}`]} idleText="Удалить" loadingText="Удаление…" />
                       </div>
                     </td>
                   </tr>
@@ -622,6 +867,10 @@ function App() {
         <section className="stack">
           <form className="form" onSubmit={createRelayTarget}>
             <h2>Добавить ретранслятор</h2>
+            <p className="subtle">
+              Ретранслятор копирует входящий webhook YooKassa на ваш URL. Если включен флажок добавления ссылки на чек,
+              в payload добавляются поля generated_receipt_url и generated_receipt_uuid после создания чека.
+            </p>
             <div className="grid cols-2">
               <select value={relayForm.store_id} onChange={(e) => setRelayForm({ ...relayForm, store_id: e.target.value })} required>
                 <option value="">Выбрать магазин</option>
@@ -633,7 +882,22 @@ function App() {
               <input placeholder='Headers JSON, напр. {"Authorization":"Bearer ..."}' value={relayForm.headers_json} onChange={(e) => setRelayForm({ ...relayForm, headers_json: e.target.value })} />
               <input placeholder='Шаблон payload, напр. {"payment":"{{object.id}}"}' value={relayForm.payload_template} onChange={(e) => setRelayForm({ ...relayForm, payload_template: e.target.value })} />
             </div>
-            <button type="submit">Сохранить ретранслятор</button>
+
+            <div className="example-block">
+              <strong>Пример webhook YooKassa:</strong>
+              <pre>{`{
+  "event": "payment.succeeded",
+  "object": { "id": "2b7f-0001", "amount": { "value": "1990.00", "currency": "RUB" } }
+}`}</pre>
+              <strong>Что может добавить ретранслятор:</strong>
+              <pre>{`{
+  "generated_receipt_url": "https://lknpd.nalog.ru/...",
+  "generated_receipt_uuid": "uuid"
+}`}</pre>
+            </div>
+
+            <InlineError message={inlineErrors.relayForm} />
+            <AsyncButton type="submit" loading={actionLoading.relayForm} idleText="Сохранить ретранслятор" loadingText="Сохранение…" />
           </form>
 
           <div className="table-wrap">
@@ -653,8 +917,9 @@ function App() {
 
       {activeTab === 'telegram' && (
         <section className="stack">
-          <form className="form" onSubmit={createTelegramChannel}>
-            <h2>Добавить Telegram уведомления</h2>
+          <form className="form" onSubmit={saveTelegramChannel}>
+            <h2>{editingTelegramId ? 'Редактировать Telegram бота' : 'Добавить Telegram бота'}</h2>
+            <p className="subtle">Выберите события галочками: бот будет присылать только их. Любое событие можно включить/выключить позже.</p>
             <div className="grid cols-2">
               <select value={telegramForm.store_id} onChange={(e) => setTelegramForm({ ...telegramForm, store_id: e.target.value })} required>
                 <option value="">Выбрать магазин</option>
@@ -663,16 +928,49 @@ function App() {
               <input placeholder="Название" value={telegramForm.name} onChange={(e) => setTelegramForm({ ...telegramForm, name: e.target.value })} required />
               <input placeholder="Bot token" value={telegramForm.bot_token} onChange={(e) => setTelegramForm({ ...telegramForm, bot_token: e.target.value })} required />
               <input placeholder="chat_id" value={telegramForm.chat_id} onChange={(e) => setTelegramForm({ ...telegramForm, chat_id: e.target.value })} required />
-              <input placeholder="topic_id (опционально)" value={telegramForm.topic_id} onChange={(e) => setTelegramForm({ ...telegramForm, topic_id: e.target.value })} />
-              <input placeholder="events через запятую" value={telegramForm.events_json} onChange={(e) => setTelegramForm({ ...telegramForm, events_json: e.target.value })} />
+              <label>
+                topic_id (опционально)
+                <input placeholder="Например 123" value={telegramForm.topic_id} onChange={(e) => setTelegramForm({ ...telegramForm, topic_id: e.target.value })} />
+                <small>Используйте для форум-темы в группе (message_thread_id).</small>
+              </label>
+              <label className="inline">
+                <input type="checkbox" checked={telegramForm.include_receipt_url} onChange={(e) => setTelegramForm({ ...telegramForm, include_receipt_url: e.target.checked })} />
+                Добавлять ссылку на чек
+              </label>
             </div>
-            <label className="inline"><input type="checkbox" checked={telegramForm.include_receipt_url} onChange={(e) => setTelegramForm({ ...telegramForm, include_receipt_url: e.target.checked })} />Добавлять ссылку на чек</label>
-            <button type="submit">Сохранить канал</button>
+
+            <div className="events-grid">
+              {telegramEventOptions.map((eventOption) => (
+                <label key={eventOption.key} className="event-option">
+                  <input
+                    type="checkbox"
+                    checked={telegramForm.events_json.includes(eventOption.key)}
+                    onChange={() => toggleTelegramEvent(eventOption.key)}
+                  />
+                  <div>
+                    <strong>{eventOption.title}</strong>
+                    <small>{eventOption.hint}</small>
+                    <code>{eventOption.key}</code>
+                  </div>
+                </label>
+              ))}
+            </div>
+
+            <InlineError message={inlineErrors.telegramForm} />
+            <div className="actions-row">
+              <AsyncButton
+                type="submit"
+                loading={actionLoading.telegramForm}
+                idleText={editingTelegramId ? 'Сохранить изменения' : 'Сохранить бота'}
+                loadingText="Сохранение…"
+              />
+              {editingTelegramId ? <button type="button" onClick={cancelTelegramEdit}>Отмена</button> : null}
+            </div>
           </form>
 
           <div className="table-wrap">
             <table>
-              <thead><tr><th>ID</th><th>Store</th><th>Название</th><th>chat_id</th><th>topic_id</th><th>События</th></tr></thead>
+              <thead><tr><th>ID</th><th>Store</th><th>Название</th><th>chat_id</th><th>topic_id</th><th>События</th><th>Действия</th></tr></thead>
               <tbody>
                 {telegramChannels.map((channel) => (
                   <tr key={channel.id}>
@@ -681,7 +979,18 @@ function App() {
                     <td>{channel.name}</td>
                     <td>{channel.chat_id}</td>
                     <td>{channel.topic_id || '-'}</td>
-                    <td>{channel.events_json.join(', ')}</td>
+                    <td>{Array.isArray(channel.events_json) ? channel.events_json.join(', ') : ''}</td>
+                    <td>
+                      <div className="actions-row">
+                        <button onClick={() => startEditTelegram(channel)}>Редактировать</button>
+                        <AsyncButton
+                          onClick={() => sendTelegramTest(channel.id)}
+                          loading={actionLoading[`telegramTest:${channel.id}`]}
+                          idleText="Тест"
+                          loadingText="Отправка…"
+                        />
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -706,19 +1015,29 @@ function App() {
       )}
 
       {activeTab === 'queue' && (
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>ID</th><th>Store</th><th>Payment</th><th>Тип</th><th>Status</th><th>Попытки</th><th>Ошибка</th><th></th></tr></thead>
-            <tbody>
-              {queue.map((item) => (
-                <tr key={item.id}>
-                  <td>{item.id}</td><td>{item.store_id}</td><td>{item.payment_id}</td><td>{item.task_type}</td><td>{item.status}</td><td>{item.attempts}/{item.max_attempts}</td><td>{item.error_message || '-'}</td>
-                  <td><button onClick={() => retryTask(item.id)}>Retry</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <section className="stack">
+          <InlineError message={inlineErrors.queueAction} />
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>Store</th><th>Payment</th><th>Тип</th><th>Status</th><th>Попытки</th><th>Ошибка</th><th></th></tr></thead>
+              <tbody>
+                {queue.map((item) => (
+                  <tr key={item.id}>
+                    <td>{item.id}</td><td>{item.store_id}</td><td>{item.payment_id}</td><td>{item.task_type}</td><td>{item.status}</td><td>{item.attempts}/{item.max_attempts}</td><td>{item.error_message || '-'}</td>
+                    <td>
+                      <AsyncButton
+                        onClick={() => retryTask(item.id)}
+                        loading={actionLoading[`retryTask:${item.id}`]}
+                        idleText="Retry"
+                        loadingText="Повтор…"
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
       )}
 
       {activeTab === 'receipts' && (
@@ -757,6 +1076,41 @@ function App() {
           </div>
         </section>
       )}
+
+      {activeTab === 'maintenance' && (
+        <section className="stack">
+          <form className="form" onSubmit={saveMaintenanceSettings}>
+            <h2>Очистка БД: сроки и лимиты</h2>
+            <p className="subtle">Можно одновременно использовать срок хранения (дни) и лимит последних записей.</p>
+            <div className="grid cols-2">
+              <label>Логи: хранить дней<input type="number" min="0" value={maintenanceSettings.log_retention_days} onChange={(e) => setMaintenanceSettings({ ...maintenanceSettings, log_retention_days: e.target.value })} /></label>
+              <label>Логи: оставить последних<input type="number" min="0" value={maintenanceSettings.keep_last_logs} onChange={(e) => setMaintenanceSettings({ ...maintenanceSettings, keep_last_logs: e.target.value })} /></label>
+              <label>События: хранить дней<input type="number" min="0" value={maintenanceSettings.event_retention_days} onChange={(e) => setMaintenanceSettings({ ...maintenanceSettings, event_retention_days: e.target.value })} /></label>
+              <label>События: оставить последних<input type="number" min="0" value={maintenanceSettings.keep_last_events} onChange={(e) => setMaintenanceSettings({ ...maintenanceSettings, keep_last_events: e.target.value })} /></label>
+              <label>Очередь: хранить дней<input type="number" min="0" value={maintenanceSettings.queue_retention_days} onChange={(e) => setMaintenanceSettings({ ...maintenanceSettings, queue_retention_days: e.target.value })} /></label>
+              <label>Очередь: оставить последних<input type="number" min="0" value={maintenanceSettings.keep_last_queue} onChange={(e) => setMaintenanceSettings({ ...maintenanceSettings, keep_last_queue: e.target.value })} /></label>
+              <label>Чеки: хранить дней<input type="number" min="0" value={maintenanceSettings.receipt_retention_days} onChange={(e) => setMaintenanceSettings({ ...maintenanceSettings, receipt_retention_days: e.target.value })} /></label>
+              <label>Чеки: оставить последних<input type="number" min="0" value={maintenanceSettings.keep_last_receipts} onChange={(e) => setMaintenanceSettings({ ...maintenanceSettings, keep_last_receipts: e.target.value })} /></label>
+              <label>Интервал автоочистки (мин)<input type="number" min="1" value={maintenanceSettings.cleanup_interval_minutes} onChange={(e) => setMaintenanceSettings({ ...maintenanceSettings, cleanup_interval_minutes: e.target.value })} /></label>
+            </div>
+            <InlineError message={inlineErrors.maintenanceSettings} />
+            <div className="actions-row">
+              <AsyncButton type="submit" loading={actionLoading.maintenanceSettings} idleText="Сохранить настройки" loadingText="Сохранение…" />
+              <AsyncButton type="button" onClick={runCleanupNow} loading={actionLoading.maintenanceCleanup} idleText="Запустить очистку сейчас" loadingText="Очистка…" />
+            </div>
+          </form>
+
+          {lastCleanupResult ? (
+            <div className="card">
+              <h3>Результат последней ручной очистки</h3>
+              <p>Логи: {lastCleanupResult.deleted_logs}, События: {lastCleanupResult.deleted_events}, Очередь: {lastCleanupResult.deleted_queue}, Чеки: {lastCleanupResult.deleted_receipts}</p>
+              <p>Время: {lastCleanupResult.ran_at}</p>
+            </div>
+          ) : null}
+        </section>
+      )}
+
+      {toast.message ? <div className={`toast ${toast.type}`}>{toast.message}</div> : null}
     </div>
   )
 }
