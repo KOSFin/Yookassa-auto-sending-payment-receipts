@@ -20,13 +20,32 @@ def build_context(payload: dict[str, Any], store: Any) -> dict[str, Any]:
     payment_id = get_nested(payload, store.payment_id_path, '')
     amount = get_nested(payload, store.amount_path, 0)
     customer_name = get_nested(payload, store.customer_name_path, '')
-    return {
+    payment_description = get_nested(payload, getattr(store, 'payment_description_path', 'object.description'), '')
+
+    context = {
         'payment_id': payment_id,
         'amount': amount,
         'customer_name': customer_name,
+        'payment_description': payment_description,
         'event': payload.get('event', ''),
         'payload': payload,
     }
+
+    raw_custom_map = getattr(store, 'custom_variables_json', {}) or {}
+    if isinstance(raw_custom_map, dict):
+        custom_values: dict[str, Any] = {}
+        for variable_name, source_path in raw_custom_map.items():
+            key = str(variable_name).strip()
+            path = str(source_path).strip()
+            if not key or not path:
+                continue
+            value = get_nested(payload, path, '')
+            custom_values[key] = value
+            if key not in context:
+                context[key] = value
+        context['custom'] = custom_values
+
+    return context
 
 
 def render_template(source: str, context: dict[str, Any]) -> str:

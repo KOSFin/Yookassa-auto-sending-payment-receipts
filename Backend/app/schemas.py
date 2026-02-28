@@ -14,6 +14,8 @@ class StoreBase(BaseModel):
     amount_path: str = 'object.amount.value'
     payment_id_path: str = 'object.id'
     customer_name_path: str = 'object.metadata.customer_name'
+    payment_description_path: str = 'object.description'
+    custom_variables_json: dict = Field(default_factory=dict)
     relay_mode: RelayMode = RelayMode.RETRY_UNTIL_200
     relay_retry_limit: int = 5
     include_receipt_url_in_relay: bool = False

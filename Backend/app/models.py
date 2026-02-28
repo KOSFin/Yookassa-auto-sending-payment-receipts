@@ -54,6 +54,8 @@ class Store(Base):
     amount_path: Mapped[str] = mapped_column(String(255), default='object.amount.value')
     payment_id_path: Mapped[str] = mapped_column(String(255), default='object.id')
     customer_name_path: Mapped[str] = mapped_column(String(255), default='object.metadata.customer_name')
+    payment_description_path: Mapped[str] = mapped_column(String(255), default='object.description')
+    custom_variables_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
     relay_mode: Mapped[RelayMode] = mapped_column(Enum(RelayMode), default=RelayMode.RETRY_UNTIL_200)
     relay_retry_limit: Mapped[int] = mapped_column(Integer, default=5)

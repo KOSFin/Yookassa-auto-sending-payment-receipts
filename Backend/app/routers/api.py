@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import ipaddress
 import json
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import Select, and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,6 +70,56 @@ def _parse_date(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value).replace(tzinfo=None)
+
+
+YOOKASSA_ALLOWED_IP_RANGES = [
+    '185.71.76.0/27',
+    '185.71.77.0/27',
+    '77.75.153.0/25',
+    '77.75.156.11/32',
+    '77.75.156.35/32',
+    '77.75.154.128/25',
+    '2a02:5180::/32',
+]
+
+
+def _extract_client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get('x-forwarded-for', '').strip()
+    if forwarded_for:
+        return forwarded_for.split(',')[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return ''
+
+
+def _is_ip_allowed(ip_value: str) -> bool:
+    if not ip_value:
+        return False
+    configured = [item.strip() for item in YOOKASSA_ALLOWED_IP_RANGES if item.strip()]
+    try:
+        ip_obj = ipaddress.ip_address(ip_value)
+    except ValueError:
+        return False
+    for item in configured:
+        try:
+            network = ipaddress.ip_network(item, strict=False)
+        except ValueError:
+            continue
+        if ip_obj in network:
+            return True
+    return False
+
+
+def _validate_webhook_payload(payload: dict) -> tuple[str, dict]:
+    if str(payload.get('type', 'notification')) not in {'notification', ''}:
+        raise HTTPException(status_code=400, detail='Invalid webhook payload: type must be notification')
+    event_name = str(payload.get('event') or '').strip()
+    if not event_name or '.' not in event_name:
+        raise HTTPException(status_code=400, detail='Invalid webhook payload: event is required')
+    obj = payload.get('object')
+    if not isinstance(obj, dict):
+        raise HTTPException(status_code=400, detail='Invalid webhook payload: object is required')
+    return event_name, obj
 
 
 async def _create_log(
@@ -723,6 +774,24 @@ async def update_relay_target(
     return item
 
 
+@router.delete('/relay-targets/{target_id}')
+async def delete_relay_target(target_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    item = await db.get(RelayTarget, target_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail='Relay target not found')
+
+    await db.delete(item)
+    await _create_log(
+        db,
+        'relay_target_deleted',
+        f'Удален ретранслятор: {item.name}',
+        store_id=item.store_id,
+        context={'target_id': target_id},
+    )
+    await db.commit()
+    return {'status': 'deleted'}
+
+
 @router.get('/telegram-channels', response_model=list[TelegramChannelOut])
 async def list_telegram_channels(
     store_id: int | None = Query(default=None),
@@ -1012,16 +1081,21 @@ async def get_stats(
 
 
 @router.post('/webhook/{store_path}')
-async def yookassa_webhook(store_path: str, payload: dict, db: AsyncSession = Depends(get_db)) -> dict:
+async def yookassa_webhook(store_path: str, payload: dict, request: Request, db: AsyncSession = Depends(get_db)) -> dict:
     result = await db.execute(select(Store).where(Store.webhook_path == store_path, Store.is_active.is_(True)))
     store = result.scalar_one_or_none()
     if store is None:
         raise HTTPException(status_code=404, detail='Store not found')
 
+    source_ip = _extract_client_ip(request)
+    if settings.webhook_ip_validation and not _is_ip_allowed(source_ip):
+        raise HTTPException(status_code=403, detail='Webhook source IP is not allowed')
+
+    event_name, object_payload = _validate_webhook_payload(payload)
+
     payment_id = str(get_nested(payload, store.payment_id_path, ''))
     if not payment_id:
-        payment_id = str(payload.get('object', {}).get('id', 'unknown'))
-    event_name = str(payload.get('event', 'unknown'))
+        payment_id = str(object_payload.get('id', 'unknown'))
 
     event = PaymentEvent(
         store_id=store.id,
@@ -1073,6 +1147,12 @@ async def yookassa_webhook(store_path: str, payload: dict, db: AsyncSession = De
             message=f'Получено уведомление на возврат {payment_id} ({event_name})',
         )
 
-    await _create_log(db, 'webhook_received', f'Вебхук {event_name} для платежа {payment_id}', store_id=store.id, context=payload)
+    await _create_log(
+        db,
+        'webhook_received',
+        f'Вебхук {event_name} для платежа {payment_id}',
+        store_id=store.id,
+        context={**payload, 'source_ip': source_ip},
+    )
     await db.commit()
     return {'status': 'accepted', 'event_id': event.id, 'relay_status': event.relay_status}

@@ -198,6 +198,10 @@ button {
   margin-top: 10px;
 }
 
+.col-span-2 {
+  grid-column: 1 / -1;
+}
+
 .hint-block {
   border: 1px solid #dbeafe;
   background: #eff6ff;

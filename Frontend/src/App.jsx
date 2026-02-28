@@ -45,7 +45,9 @@ const templateVariables = [
   { key: '{{payment_id}}', hint: 'ID платежа из webhook.' },
   { key: '{{amount}}', hint: 'Сумма из поля amount_path.' },
   { key: '{{customer_name}}', hint: 'Имя клиента по customer_name_path.' },
+  { key: '{{payment_description}}', hint: 'Описание платежа (обычно object.description).' },
   { key: '{{event}}', hint: 'Имя события, например payment.succeeded.' },
+  { key: '{{custom.user_id}}', hint: 'Пользовательская переменная из custom_variables_json.' },
   { key: '{{payload.object.id}}', hint: 'Доступ к исходному payload webhook.' },
 ]
 
@@ -238,6 +240,8 @@ function App() {
     amount_path: 'object.amount.value',
     payment_id_path: 'object.id',
     customer_name_path: 'object.metadata.customer_name',
+    payment_description_path: 'object.description',
+    custom_variables_json: '{"user_id":"object.metadata.user_id","source_description":"object.description"}',
     relay_mode: 'retry_until_200',
     relay_retry_limit: 5,
     include_receipt_url_in_relay: true,
@@ -401,6 +405,7 @@ function App() {
           body: JSON.stringify({
             ...storeForm,
             relay_retry_limit: Number(storeForm.relay_retry_limit),
+            custom_variables_json: storeForm.custom_variables_json ? JSON.parse(storeForm.custom_variables_json) : {},
             mytax_profile_id: storeForm.mytax_profile_id ? Number(storeForm.mytax_profile_id) : null,
           }),
         })
@@ -412,6 +417,8 @@ function App() {
           amount_path: 'object.amount.value',
           payment_id_path: 'object.id',
           customer_name_path: 'object.metadata.customer_name',
+          payment_description_path: 'object.description',
+          custom_variables_json: '{"user_id":"object.metadata.user_id","source_description":"object.description"}',
           relay_mode: 'retry_until_200',
           relay_retry_limit: 5,
           include_receipt_url_in_relay: true,
@@ -437,6 +444,8 @@ function App() {
       amount_path: store.amount_path || 'object.amount.value',
       payment_id_path: store.payment_id_path || 'object.id',
       customer_name_path: store.customer_name_path || 'object.metadata.customer_name',
+      payment_description_path: store.payment_description_path || 'object.description',
+      custom_variables_json: JSON.stringify(store.custom_variables_json || {}, null, 0),
       relay_mode: store.relay_mode || 'retry_until_200',
       relay_retry_limit: store.relay_retry_limit || 5,
       include_receipt_url_in_relay: Boolean(store.include_receipt_url_in_relay),
@@ -456,6 +465,8 @@ function App() {
       amount_path: 'object.amount.value',
       payment_id_path: 'object.id',
       customer_name_path: 'object.metadata.customer_name',
+      payment_description_path: 'object.description',
+      custom_variables_json: '{"user_id":"object.metadata.user_id","source_description":"object.description"}',
       relay_mode: 'retry_until_200',
       relay_retry_limit: 5,
       include_receipt_url_in_relay: true,
@@ -666,6 +677,21 @@ function App() {
       include_receipt_url: false,
       is_active: true,
     })
+  }
+
+  const deleteRelayTarget = async (targetId) => {
+    await runAction(
+      `relayDelete:${targetId}`,
+      async () => {
+        await api(`/relay-targets/${targetId}`, { method: 'DELETE' })
+        if (editingRelayId === targetId) {
+          cancelRelayEdit()
+        }
+        invalidateCache(['relay:'])
+        await loadAll({ force: true })
+      },
+      'Ретранслятор удалён',
+    )
   }
 
   const toggleTelegramEvent = (eventName) => {
@@ -915,8 +941,11 @@ function App() {
                 <FloatingInput label="Путь к сумме (JSON path)" value={storeForm.amount_path} onChange={(e) => setStoreForm({ ...storeForm, amount_path: e.target.value })} />
                 <FloatingInput label="Путь к ID платежа (JSON path)" value={storeForm.payment_id_path} onChange={(e) => setStoreForm({ ...storeForm, payment_id_path: e.target.value })} />
                 <FloatingInput label="Путь к имени клиента (JSON path)" value={storeForm.customer_name_path} onChange={(e) => setStoreForm({ ...storeForm, customer_name_path: e.target.value })} />
+                <FloatingInput label="Путь к описанию платежа (JSON path)" value={storeForm.payment_description_path} onChange={(e) => setStoreForm({ ...storeForm, payment_description_path: e.target.value })} />
+                <FloatingInput label="Пользовательские переменные (JSON key->path)" value={storeForm.custom_variables_json} onChange={(e) => setStoreForm({ ...storeForm, custom_variables_json: e.target.value })} className="col-span-2" />
               </div>
-              <p className="subtle">Примеры путей: <b>object.amount.value</b>, <b>object.id</b>, <b>object.metadata.customer_name</b>.</p>
+              <p className="subtle">Примеры путей: <b>object.amount.value</b>, <b>object.id</b>, <b>object.description</b>, <b>object.metadata.user_id</b>.</p>
+              <p className="subtle">Пример пользовательских переменных: <code>{`{"user_id":"object.metadata.user_id","source_description":"object.description"}`}</code>. В шаблоне: <b>{'{{custom.user_id}}'}</b>, <b>{'{{custom.source_description}}'}</b>.</p>
             </details>
 
             <label className="inline">
@@ -1119,7 +1148,17 @@ function App() {
                 {relayTargets.map((target) => (
                   <tr key={target.id}>
                     <td>{target.id}</td><td>{target.store_id}</td><td>{target.name}</td><td>{target.url}</td><td>{target.method}</td><td>{target.include_receipt_url ? 'Да' : 'Нет'}</td><td>{target.is_active ? 'Да' : 'Нет'}</td>
-                    <td><button onClick={() => startEditRelayTarget(target)}>Редактировать</button></td>
+                    <td>
+                      <div className="actions-row">
+                        <button onClick={() => startEditRelayTarget(target)}>Редактировать</button>
+                        <AsyncButton
+                          onClick={() => deleteRelayTarget(target.id)}
+                          loading={actionLoading[`relayDelete:${target.id}`]}
+                          idleText="Удалить"
+                          loadingText="Удаление…"
+                        />
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>

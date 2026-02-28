@@ -29,6 +29,18 @@ async def ensure_runtime_schema() -> None:
                 "ADD COLUMN IF NOT EXISTS include_receipt_url BOOLEAN NOT NULL DEFAULT FALSE"
             )
         )
+        await conn.execute(
+            text(
+                "ALTER TABLE stores "
+                "ADD COLUMN IF NOT EXISTS payment_description_path VARCHAR(255) NOT NULL DEFAULT 'object.description'"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE stores "
+                "ADD COLUMN IF NOT EXISTS custom_variables_json JSON NOT NULL DEFAULT '{}'::json"
+            )
+        )
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
