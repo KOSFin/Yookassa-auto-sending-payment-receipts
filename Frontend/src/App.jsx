@@ -420,7 +420,10 @@ function App() {
     try {
       await api('/auth/login', {
         method: 'POST',
-        body: JSON.stringify(authForm),
+        body: JSON.stringify({
+          login: authForm.login.trim(),
+          password: authForm.password.trim(),
+        }),
       })
       await refreshAuthStatus()
       await loadAll({ force: true })
