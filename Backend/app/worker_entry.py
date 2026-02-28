@@ -2,7 +2,7 @@ import asyncio
 import logging
 
 from app.core.config import settings
-from app.core.db import Base, engine
+from app.core.db import Base, engine, ensure_runtime_schema
 from app.services.worker import worker_loop
 
 
@@ -17,6 +17,7 @@ async def main() -> None:
     configure_logging()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await ensure_runtime_schema()
     logging.getLogger(__name__).info(
         'Starting worker process (poll_seconds=%s)',
         settings.worker_poll_interval_seconds,

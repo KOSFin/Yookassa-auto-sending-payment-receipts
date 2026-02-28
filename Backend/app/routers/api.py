@@ -36,6 +36,7 @@ from app.schemas import (
     ReceiptOut,
     ReceiptTaskOut,
     RelayTargetCreate,
+    RelayTargetUpdate,
     RelayTargetOut,
     StatsOut,
     StoreCreate,
@@ -688,6 +689,35 @@ async def create_relay_target(payload: RelayTargetCreate, db: AsyncSession = Dep
     item = RelayTarget(**payload.model_dump())
     db.add(item)
     await _create_log(db, 'relay_target_created', f'Добавлен ретранслятор: {item.name}', store_id=payload.store_id)
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+@router.put('/relay-targets/{target_id}', response_model=RelayTargetOut)
+async def update_relay_target(
+    target_id: int,
+    payload: RelayTargetUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> RelayTarget:
+    item = await db.get(RelayTarget, target_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail='Relay target not found')
+
+    store = await db.get(Store, payload.store_id)
+    if store is None:
+        raise HTTPException(status_code=404, detail='Store not found')
+
+    for key, value in payload.model_dump().items():
+        setattr(item, key, value)
+
+    await _create_log(
+        db,
+        'relay_target_updated',
+        f'Обновлен ретранслятор: {item.name}',
+        store_id=item.store_id,
+        context={'target_id': item.id},
+    )
     await db.commit()
     await db.refresh(item)
     return item

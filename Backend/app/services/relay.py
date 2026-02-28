@@ -28,7 +28,7 @@ async def relay_notification(
     async with httpx.AsyncClient(timeout=15) as client:
         for target in targets:
             body = payload.copy()
-            if store.include_receipt_url_in_relay:
+            if target.include_receipt_url:
                 if receipt_url:
                     body['generated_receipt_url'] = receipt_url
                 if receipt_uuid:

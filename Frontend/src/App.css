@@ -155,6 +155,12 @@ button {
   padding-top: 18px;
 }
 
+.floating-field.select-field > span {
+  top: -8px;
+  font-size: 11px;
+  color: #1d4ed8;
+}
+
 .floating-field > span {
   position: absolute;
   left: 10px;

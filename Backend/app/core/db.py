@@ -21,6 +21,16 @@ engine = create_async_engine(
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
+async def ensure_runtime_schema() -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "ALTER TABLE relay_targets "
+                "ADD COLUMN IF NOT EXISTS include_receipt_url BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+        )
+
+
 async def get_db() -> AsyncIterator[AsyncSession]:
     session: AsyncSession | None = None
     try:

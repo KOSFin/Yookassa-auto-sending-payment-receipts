@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.core.db import Base, engine
+from app.core.db import Base, engine, ensure_runtime_schema
 from app.routers.api import router as api_router
 from app.services.worker import worker_loop
 
@@ -31,6 +31,7 @@ async def startup_event() -> None:
     global _worker_task
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await ensure_runtime_schema()
     if settings.run_embedded_worker and _worker_task is None:
         _worker_task = asyncio.create_task(worker_loop(settings.worker_poll_interval_seconds))
 

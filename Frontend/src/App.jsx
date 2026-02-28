@@ -151,15 +151,41 @@ function FloatingInput({ label, value, className = '', ...props }) {
 }
 
 function FloatingSelect({ label, value, children, className = '', ...props }) {
-  const hasValue = String(value ?? '').length > 0
+  const hasValue = true
   return (
-    <label className={`floating-field ${hasValue ? 'has-value' : ''} ${className}`}>
+    <label className={`floating-field select-field ${hasValue ? 'has-value' : ''} ${className}`}>
       <select {...props} value={value}>
         {children}
       </select>
       <span>{label}</span>
     </label>
   )
+}
+
+function safeJsonParse(text, fallback) {
+  try {
+    return text ? JSON.parse(text) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function getByPath(obj, path) {
+  if (!path) return ''
+  return String(path)
+    .split('.')
+    .filter(Boolean)
+    .reduce((acc, key) => (acc && typeof acc === 'object' ? acc[key] : undefined), obj)
+}
+
+function renderSimpleTemplate(template, context) {
+  if (!template) return ''
+  return template.replace(/\{\{\s*([^}]+)\s*\}\}/g, (_, expr) => {
+    const value = getByPath(context, String(expr).trim())
+    if (value === undefined || value === null) return ''
+    if (typeof value === 'object') return JSON.stringify(value)
+    return String(value)
+  })
 }
 
 function App() {
@@ -186,6 +212,7 @@ function App() {
 
   const [editingProfileId, setEditingProfileId] = useState(null)
   const [editingStoreId, setEditingStoreId] = useState(null)
+  const [editingRelayId, setEditingRelayId] = useState(null)
   const [editingTelegramId, setEditingTelegramId] = useState(null)
   const cacheRef = useRef({})
   const [lastFetchedAt, setLastFetchedAt] = useState({})
@@ -228,6 +255,7 @@ function App() {
     method: 'POST',
     headers_json: '{}',
     payload_template: '',
+    include_receipt_url: false,
     is_active: true,
   })
 
@@ -586,42 +614,58 @@ function App() {
     await runAction(
       'relayForm',
       async () => {
-        await api('/relay-targets', {
-          method: 'POST',
+        await api(editingRelayId ? `/relay-targets/${editingRelayId}` : '/relay-targets', {
+          method: editingRelayId ? 'PUT' : 'POST',
           body: JSON.stringify({
             ...relayForm,
             store_id: Number(relayForm.store_id),
             headers_json: relayForm.headers_json ? JSON.parse(relayForm.headers_json) : {},
           }),
         })
-        setRelayForm({ ...relayForm, name: '', url: '' })
-        invalidateCache(['telegram:'])
+        setRelayForm({
+          store_id: relayForm.store_id,
+          name: '',
+          url: '',
+          method: 'POST',
+          headers_json: '{}',
+          payload_template: '',
+          include_receipt_url: false,
+          is_active: true,
+        })
+        setEditingRelayId(null)
+        invalidateCache(['relay:'])
         await loadAll({ force: true })
       },
-      'Ретранслятор сохранён',
+      editingRelayId ? 'Ретранслятор обновлён' : 'Ретранслятор сохранён',
     )
   }
 
-  const toggleReceiptUrlForSelectedStore = async () => {
-    if (!relayForm.store_id) return
-    const selectedStore = stores.find((item) => String(item.id) === String(relayForm.store_id))
-    if (!selectedStore) return
+  const startEditRelayTarget = (target) => {
+    setEditingRelayId(target.id)
+    setRelayForm({
+      store_id: String(target.store_id),
+      name: target.name || '',
+      url: target.url || '',
+      method: target.method || 'POST',
+      headers_json: JSON.stringify(target.headers_json || {}, null, 0),
+      payload_template: target.payload_template || '',
+      include_receipt_url: Boolean(target.include_receipt_url),
+      is_active: Boolean(target.is_active),
+    })
+  }
 
-    await runAction(
-      'relayStoreSetting',
-      async () => {
-        await api(`/stores/${selectedStore.id}`, {
-          method: 'PUT',
-          body: JSON.stringify({
-            ...selectedStore,
-            include_receipt_url_in_relay: !selectedStore.include_receipt_url_in_relay,
-          }),
-        })
-        invalidateCache(['stores', 'relay:', 'events:', 'receipts:'])
-        await loadAll({ force: true })
-      },
-      'Настройка магазина обновлена',
-    )
+  const cancelRelayEdit = () => {
+    setEditingRelayId(null)
+    setRelayForm({
+      store_id: relayForm.store_id,
+      name: '',
+      url: '',
+      method: 'POST',
+      headers_json: '{}',
+      payload_template: '',
+      include_receipt_url: false,
+      is_active: true,
+    })
   }
 
   const toggleTelegramEvent = (eventName) => {
@@ -746,6 +790,31 @@ function App() {
     )
   }
 
+  const relayHeadersPreview = safeJsonParse(relayForm.headers_json, { parse_error: 'Невалидный JSON headers' })
+  const relaySampleWebhook = {
+    event: 'payment.succeeded',
+    object: {
+      id: '2b7f-0001',
+      amount: { value: '1990.00', currency: 'RUB' },
+      metadata: { customer_name: 'Иван' },
+    },
+  }
+  const relaySamplePayload = {
+    ...relaySampleWebhook,
+    ...(relayForm.include_receipt_url
+      ? {
+          generated_receipt_url: 'https://lknpd.nalog.ru/check/preview',
+          generated_receipt_uuid: 'preview-uuid',
+        }
+      : {}),
+  }
+  const relayTemplatePreviewRaw = relayForm.payload_template
+    ? renderSimpleTemplate(relayForm.payload_template, relaySamplePayload)
+    : ''
+  const relayTemplatePreview = relayTemplatePreviewRaw
+    ? safeJsonParse(relayTemplatePreviewRaw, { rendered_payload: relayTemplatePreviewRaw })
+    : relaySamplePayload
+
   return (
     <div className="page">
       <header className="topbar">
@@ -850,10 +919,6 @@ function App() {
               <p className="subtle">Примеры путей: <b>object.amount.value</b>, <b>object.id</b>, <b>object.metadata.customer_name</b>.</p>
             </details>
 
-            <label className="inline">
-              <input type="checkbox" checked={storeForm.include_receipt_url_in_relay} onChange={(e) => setStoreForm({ ...storeForm, include_receipt_url_in_relay: e.target.checked })} />
-              Добавлять ссылку на чек в ретрансляцию
-            </label>
             <label className="inline">
               <input type="checkbox" checked={storeForm.auto_cancel_on_refund} onChange={(e) => setStoreForm({ ...storeForm, auto_cancel_on_refund: e.target.checked })} />
               Авто-отмена чека при возврате
@@ -985,10 +1050,10 @@ function App() {
       {activeTab === 'relay' && (
         <section className="stack">
           <form className="form" onSubmit={createRelayTarget}>
-            <h2>Добавить ретранслятор</h2>
+            <h2>{editingRelayId ? 'Редактировать ретранслятор' : 'Добавить ретранслятор'}</h2>
             <p className="subtle">
-              Ретранслятор пересылает webhook в вашу систему (CRM/бот/ERP). Можно отправлять как исходный webhook,
-              так и шаблонизированный payload с вашими полями.
+              Здесь настраивается <b>куда</b> и <b>в каком виде</b> отправлять уведомление. Сначала заполните URL и метод,
+              потом при необходимости добавьте headers/шаблон.
             </p>
             <div className="grid cols-2">
               <FloatingSelect label="Магазин" value={relayForm.store_id} onChange={(e) => setRelayForm({ ...relayForm, store_id: e.target.value })} required>
@@ -1004,52 +1069,57 @@ function App() {
                 <option value="GET">GET</option>
                 <option value="DELETE">DELETE</option>
               </FloatingSelect>
+              <label className="inline">
+                <input
+                  type="checkbox"
+                  checked={relayForm.include_receipt_url}
+                  onChange={(e) => setRelayForm({ ...relayForm, include_receipt_url: e.target.checked })}
+                />
+                Добавлять ссылку на чек в этот ретранслятор
+              </label>
               <FloatingInput label="HTTP headers (JSON)" value={relayForm.headers_json} onChange={(e) => setRelayForm({ ...relayForm, headers_json: e.target.value })} />
               <FloatingInput label="Шаблон payload (опционально)" value={relayForm.payload_template} onChange={(e) => setRelayForm({ ...relayForm, payload_template: e.target.value })} />
             </div>
 
-            {relayForm.store_id ? (
-              <div className="hint-block">
-                <strong>Ссылка на чек в ретрансляции</strong>
-                <p>
-                  Этот флажок задаётся в настройках магазина. Сейчас: <b>{stores.find((x) => String(x.id) === String(relayForm.store_id))?.include_receipt_url_in_relay ? 'включено' : 'выключено'}</b>.
-                  Если включено — в webhook добавятся поля <b>generated_receipt_url</b> и <b>generated_receipt_uuid</b>.
-                </p>
-                <AsyncButton
-                  type="button"
-                  onClick={toggleReceiptUrlForSelectedStore}
-                  loading={actionLoading.relayStoreSetting}
-                  idleText="Переключить флажок ссылки на чек"
-                  loadingText="Сохранение…"
-                />
-                <InlineError message={inlineErrors.relayStoreSetting} />
-              </div>
-            ) : null}
-
-            <div className="example-block">
-              <strong>Пример webhook YooKassa:</strong>
-              <pre>{`{
-  "event": "payment.succeeded",
-  "object": { "id": "2b7f-0001", "amount": { "value": "1990.00", "currency": "RUB" } }
-}`}</pre>
-              <strong>Что может добавить ретранслятор:</strong>
-              <pre>{`{
-  "generated_receipt_url": "https://lknpd.nalog.ru/...",
-  "generated_receipt_uuid": "uuid"
-}`}</pre>
+            <div className="hint-block">
+              <strong>Что куда писать:</strong>
+              <p><b>URL получателя</b> — адрес вашего API/бота, куда уходит запрос.</p>
+              <p><b>HTTP headers (JSON)</b> — доп. заголовки, например <code>{`{"Authorization":"Bearer ..."}`}</code>.</p>
+              <p><b>Шаблон payload</b> — если пусто, отправляется исходный webhook (плюс ссылка на чек при включённом флажке).</p>
+              <p>Пример шаблона: {`{"payment_id":"{{object.id}}","event":"{{event}}"}`}</p>
             </div>
 
+            <details className="advanced-box" open>
+              <summary>Посмотреть итоговый запрос с текущими настройками</summary>
+              <div className="top-gap">
+                <p className="subtle">Метод: <b>{relayForm.method}</b> | URL: <b>{relayForm.url || '— не заполнен —'}</b></p>
+                <strong>Headers:</strong>
+                <pre>{JSON.stringify(relayHeadersPreview, null, 2)}</pre>
+                <strong>Payload, который уйдёт:</strong>
+                <pre>{JSON.stringify(relayTemplatePreview, null, 2)}</pre>
+              </div>
+            </details>
+
             <InlineError message={inlineErrors.relayForm} />
-            <AsyncButton type="submit" loading={actionLoading.relayForm} idleText="Сохранить ретранслятор" loadingText="Сохранение…" />
+            <div className="actions-row">
+              <AsyncButton
+                type="submit"
+                loading={actionLoading.relayForm}
+                idleText={editingRelayId ? 'Сохранить изменения' : 'Сохранить ретранслятор'}
+                loadingText="Сохранение…"
+              />
+              {editingRelayId ? <button type="button" onClick={cancelRelayEdit}>Отмена</button> : null}
+            </div>
           </form>
 
           <div className="table-wrap">
             <table>
-              <thead><tr><th>ID</th><th>Store</th><th>Название</th><th>URL</th><th>Метод</th><th>Активен</th></tr></thead>
+              <thead><tr><th>ID</th><th>Store</th><th>Название</th><th>URL</th><th>Метод</th><th>Ссылка на чек</th><th>Активен</th><th>Действия</th></tr></thead>
               <tbody>
                 {relayTargets.map((target) => (
                   <tr key={target.id}>
-                    <td>{target.id}</td><td>{target.store_id}</td><td>{target.name}</td><td>{target.url}</td><td>{target.method}</td><td>{target.is_active ? 'Да' : 'Нет'}</td>
+                    <td>{target.id}</td><td>{target.store_id}</td><td>{target.name}</td><td>{target.url}</td><td>{target.method}</td><td>{target.include_receipt_url ? 'Да' : 'Нет'}</td><td>{target.is_active ? 'Да' : 'Нет'}</td>
+                    <td><button onClick={() => startEditRelayTarget(target)}>Редактировать</button></td>
                   </tr>
                 ))}
               </tbody>

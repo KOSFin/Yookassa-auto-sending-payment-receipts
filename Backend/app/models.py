@@ -105,6 +105,7 @@ class RelayTarget(Base):
     method: Mapped[str] = mapped_column(String(16), default='POST')
     headers_json: Mapped[dict] = mapped_column(JSON, default=dict)
     payload_template: Mapped[str] = mapped_column(Text, default='')
+    include_receipt_url: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     store = relationship('Store', back_populates='relay_targets')

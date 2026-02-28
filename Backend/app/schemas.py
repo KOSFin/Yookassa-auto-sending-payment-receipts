@@ -78,10 +78,15 @@ class RelayTargetBase(BaseModel):
     method: str = 'POST'
     headers_json: dict = Field(default_factory=dict)
     payload_template: str = ''
+    include_receipt_url: bool = False
     is_active: bool = True
 
 
 class RelayTargetCreate(RelayTargetBase):
+    pass
+
+
+class RelayTargetUpdate(RelayTargetBase):
     pass
 
 
