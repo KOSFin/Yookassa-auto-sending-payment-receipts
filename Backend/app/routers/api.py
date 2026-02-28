@@ -5,11 +5,13 @@ import ipaddress
 import json
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import Select, and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
+from app.core.config import settings
 from app.models import (
     AppLog,
     MyTaxProfile,
@@ -27,6 +29,8 @@ from app.models import (
 from app.schemas import (
     AppLogOut,
     LoginProfileIn,
+    PanelAuthStatusOut,
+    PanelLoginIn,
     MyTaxProfileCreate,
     ProfileAuthStatusOut,
     ProfilePhoneChallengeIn,
@@ -50,6 +54,12 @@ from app.schemas import (
     MaintenanceCleanupOut,
     MaintenanceSettingsOut,
     MaintenanceSettingsBase,
+)
+from app.services.panel_auth import (
+    create_session_token,
+    is_panel_auth_configured,
+    verify_credentials,
+    verify_session_token,
 )
 from app.services.mytax import (
     MyTaxApiError,
@@ -120,6 +130,48 @@ def _validate_webhook_payload(payload: dict) -> tuple[str, dict]:
     if not isinstance(obj, dict):
         raise HTTPException(status_code=400, detail='Invalid webhook payload: object is required')
     return event_name, obj
+
+
+def _is_antifraud_enabled() -> bool:
+    return bool(settings.webhook_antifraud_enabled)
+
+
+def _yookassa_object_url(event_name: str, object_id: str) -> str:
+    if event_name.startswith('refund.'):
+        return f'https://api.yookassa.ru/v3/refunds/{object_id}'
+    return f'https://api.yookassa.ru/v3/payments/{object_id}'
+
+
+async def _verify_object_status_with_yookassa(event_name: str, object_payload: dict) -> None:
+    object_id = str(object_payload.get('id') or '').strip()
+    webhook_status = str(object_payload.get('status') or '').strip()
+    if not object_id or not webhook_status:
+        raise HTTPException(status_code=400, detail='Invalid webhook payload: object.id and object.status are required')
+
+    if not settings.yookassa_shop_id.strip() or not settings.yookassa_secret_key.strip():
+        raise HTTPException(
+            status_code=503,
+            detail='Anti-fraud status verification is enabled, but YOOKASSA_SHOP_ID/YOOKASSA_SECRET_KEY are missing',
+        )
+
+    url = _yookassa_object_url(event_name, object_id)
+    timeout = httpx.Timeout(10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            response = await client.get(url, auth=(settings.yookassa_shop_id, settings.yookassa_secret_key))
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f'Failed to verify webhook object in YooKassa: {exc}') from exc
+
+    body = response.json()
+    remote_status = str(body.get('status') or '').strip()
+    if not remote_status:
+        raise HTTPException(status_code=502, detail='YooKassa verification response is missing status')
+    if remote_status != webhook_status:
+        raise HTTPException(
+            status_code=403,
+            detail=f'Webhook status mismatch: payload={webhook_status}, yookassa={remote_status}',
+        )
 
 
 async def _create_log(
@@ -333,6 +385,40 @@ async def _run_cleanup(db: AsyncSession, settings: MaintenanceSettings) -> Maint
 
 @router.get('/health')
 async def health() -> dict:
+    return {'status': 'ok'}
+
+
+@router.get('/auth/status', response_model=PanelAuthStatusOut)
+async def panel_auth_status(request: Request) -> PanelAuthStatusOut:
+    configured = is_panel_auth_configured()
+    token = request.cookies.get(settings.panel_auth_cookie_name, '')
+    authenticated = configured and bool(token) and verify_session_token(token)
+    return PanelAuthStatusOut(configured=configured, authenticated=authenticated)
+
+
+@router.post('/auth/login')
+async def panel_auth_login(payload: PanelLoginIn, response: Response) -> dict:
+    if not is_panel_auth_configured():
+        raise HTTPException(status_code=503, detail='Panel auth is not configured. Set PANEL_LOGIN and PANEL_PASSWORD.')
+    if not verify_credentials(payload.login, payload.password):
+        raise HTTPException(status_code=401, detail='Invalid login or password')
+
+    token = create_session_token(payload.login.strip())
+    response.set_cookie(
+        key=settings.panel_auth_cookie_name,
+        value=token,
+        max_age=settings.panel_auth_token_ttl_seconds,
+        httponly=True,
+        samesite='lax',
+        secure=settings.panel_auth_cookie_secure,
+        path='/',
+    )
+    return {'status': 'ok'}
+
+
+@router.post('/auth/logout')
+async def panel_auth_logout(response: Response) -> dict:
+    response.delete_cookie(key=settings.panel_auth_cookie_name, path='/')
     return {'status': 'ok'}
 
 
@@ -1087,11 +1173,13 @@ async def yookassa_webhook(store_path: str, payload: dict, request: Request, db:
     if store is None:
         raise HTTPException(status_code=404, detail='Store not found')
 
-    source_ip = _extract_client_ip(request)
-    if settings.webhook_ip_validation and not _is_ip_allowed(source_ip):
-        raise HTTPException(status_code=403, detail='Webhook source IP is not allowed')
-
     event_name, object_payload = _validate_webhook_payload(payload)
+    source_ip = _extract_client_ip(request)
+
+    if _is_antifraud_enabled():
+        if not _is_ip_allowed(source_ip):
+            raise HTTPException(status_code=403, detail='Webhook source IP is not allowed')
+        await _verify_object_status_with_yookassa(event_name, object_payload)
 
     payment_id = str(get_nested(payload, store.payment_id_path, ''))
     if not payment_id:

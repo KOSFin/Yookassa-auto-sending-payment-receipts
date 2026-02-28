@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.db import Base, engine, ensure_runtime_schema
 from app.routers.api import router as api_router
+from app.services.panel_auth import is_panel_auth_configured, verify_session_token
 from app.services.worker import worker_loop
 
 
@@ -20,6 +22,27 @@ app.add_middleware(
     allow_methods=['*'],
     allow_headers=['*'],
 )
+
+
+@app.middleware('http')
+async def panel_auth_guard(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith('/api'):
+        return await call_next(request)
+    if path.startswith('/api/health') or path.startswith('/api/webhook/') or path.startswith('/api/auth/'):
+        return await call_next(request)
+
+    if not is_panel_auth_configured():
+        return JSONResponse(
+            status_code=503,
+            content={'detail': 'Panel auth is not configured. Set PANEL_LOGIN and PANEL_PASSWORD.'},
+        )
+
+    token = request.cookies.get(settings.panel_auth_cookie_name, '')
+    if not token or not verify_session_token(token):
+        return JSONResponse(status_code=401, content={'detail': 'Authentication required'})
+
+    return await call_next(request)
 
 app.include_router(api_router, prefix='/api')
 

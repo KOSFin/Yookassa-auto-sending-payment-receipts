@@ -1,6 +1,6 @@
 # YooKassa → Мой Налог Auto Relay
 
-![Cover](https://capsule-render.vercel.app/api?type=waving&height=200&color=0:2563eb,100:7c3aed&text=YooKassa%20Auto%20MyTax%20Relay&fontAlign=50&fontAlignY=38&fontSize=38&fontColor=ffffff)
+![Cover](https://capsule-render.vercel.app/api?type=waving&height=220&color=0:2563eb,100:7c3aed&text=YooKassa%20Auto%20MyTax%20Relay&fontAlign=50&fontAlignY=38&fontSize=38&fontColor=ffffff)
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
@@ -9,370 +9,52 @@
 ![Docker Compose](https://img.shields.io/badge/Docker%20Compose-Ready-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-Open-source система для самозанятых: принимает webhook-уведомления YooKassa, формирует/отзывает чеки в «Мой Налог», ретранслирует уведомления в сторонние URL, ведёт очередь задач, логи, статистику и Telegram-оповещения.
+Open-source система для самозанятых: получает webhook YooKassa, формирует/отзывает чеки в «Мой Налог», ретранслирует события во внешние endpoint’ы и отправляет Telegram-уведомления.
 
----
+## Быстрый старт (2 команды)
 
-## Почему этот проект появился
+Windows PowerShell:
 
-YooKassa убрала встроенную автоматическую отправку чеков в «Мой Налог». Этот проект закрывает образовавшийся разрыв:
+```powershell
+Copy-Item .env.example .env
+./scripts/up.ps1
+```
 
-- получает события `payment.*` / `refund.*` от YooKassa;
-- конвертирует их в задачи формирования/отмены чеков;
-- при проблемах авторизации «Мой Налог» не теряет данные, а ставит задачи в очередь `WAITING_AUTH`;
-- после восстановления доступа автоматически дообрабатывает накопленные задачи.
+Linux/macOS:
 
-Webhook документация YooKassa: https://yookassa.ru/developers/using-api/webhooks
+```bash
+cp .env.example .env
+chmod +x scripts/up.sh
+./scripts/up.sh
+```
 
----
+## Важно по безопасности
 
-## Что реализовано
+- Панель заблокирована, пока не заданы `PANEL_LOGIN` и `PANEL_PASSWORD`.
+- Для HTTPS включайте `PANEL_AUTH_COOKIE_SECURE=true`.
+- Для anti-fraud используйте единый флаг `WEBHOOK_ANTIFRAUD_ENABLED=true`.
 
-- Мульти-магазин: несколько магазинов на одном домене через разные пути (`/webhook/{store_path}`)
-- CRUD настроек через веб-интерфейс
-- Гибрид «Мой Налог»:
-	- `official_api` режим
-	- `unofficial_api` режим (token/cookie-based)
-- Очередь чеков с retry-логикой и статусами
-- Авто-отмена чека при возврате (`refund.succeeded` / `payment.canceled`)
-- Ретрансляция webhook в сторонние endpoint’ы:
-	- `fire_and_forget`
-	- `retry_until_200`
-	- опциональное добавление поля `generated_receipt_url`
-- Telegram-уведомления:
-	- поддержка обычных чатов/групп
-	- поддержка `message_thread_id` (topics)
-	- выбор событий для отправки
-	- редактирование созданного Telegram-канала
-	- тестовая отправка сообщения из панели
-- Обслуживание БД:
-	- автоочистка логов/событий/очереди/чеков по сроку хранения
-	- автоочистка по лимиту количества записей
-	- ручной запуск очистки из UI
-- Статистика и аналитика:
-	- фильтры по магазину и дате
-	- события, очередь, чеки, логи
+## Документация
 
----
+- [Установка на Windows](docs/INSTALL_WINDOWS.md)
+- [Установка на Linux](docs/INSTALL_LINUX.md)
+- [Настройка SSL/TLS](docs/SSL_SETUP.md)
+- [Переменные окружения](docs/ENVIRONMENT.md)
+- [Эксплуатация: backup/update/restore](docs/OPERATIONS.md)
+- [Скрипты автоматизации](docs/SCRIPTS.md)
 
 ## Архитектура
 
 ```mermaid
 flowchart LR
-	A[YooKassa Webhooks] --> B[Proxy Nginx]
-	B --> C[FastAPI Backend]
-	C --> D[(PostgreSQL)]
-	C --> E[Relay Targets HTTP]
-	C --> F[Telegram Bot API]
-	C --> G[MyTax API Adapter]
-	H[Worker] --> D
-	H --> G
-	I[React Admin Panel] --> B
-	B --> I
+    A[YooKassa Webhooks] --> B[Nginx Proxy]
+    B --> C[FastAPI Backend]
+    C --> D[(PostgreSQL)]
+    C --> E[Relay Targets]
+    C --> F[Telegram Bot API]
+    H[Worker] --> D
 ```
-
-```mermaid
-stateDiagram-v2
-	[*] --> pending
-	pending --> processing
-	processing --> success
-	processing --> waiting_auth
-	processing --> failed
-	waiting_auth --> pending: после повторной авторизации
-	pending --> failed: превышен max_attempts
-```
-
----
-
-## Структура проекта
-
-```text
-Backend/
-	app/
-		core/          # config + db
-		routers/       # API endpoints
-		services/      # mytax/relay/telegram/template/worker
-		models.py      # SQLAlchemy models
-		schemas.py     # Pydantic schemas
-		main.py        # FastAPI entrypoint
-		worker_entry.py
-Frontend/
-	src/
-		App.jsx        # web admin panel
-docker-compose.yml
-deploy/nginx/conf.d/default.conf
-.env.example
-```
-
----
-
-## Быстрый старт (Docker Compose)
-
-### 1) Подготовка
-
-```bash
-cp .env.example .env
-```
-
-Отредактируйте `.env`:
-
-```env
-POSTGRES_DB=yookassa_auto
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=strong-password
-APP_ENV=production
-APP_DEBUG=false
-WORKER_POLL_INTERVAL_SECONDS=5
-PROXY_BASE_URL=https://your-domain.tld
-RUN_EMBEDDED_WORKER=false
-```
-
-### 2) Запуск
-
-```bash
-docker compose up -d --build
-```
-
-Для автодеплоя (без ручной чистки контейнеров) используйте:
-
-```bash
-docker compose up -d --build --remove-orphans
-```
-
-`--force-recreate` используйте только при необходимости (например, после ручных правок в volumes/сетях),
-иначе он добавляет лишний даунтайм фронтенда на каждом деплое.
-
-По умолчанию `proxy` публикуется на случайный свободный порт хоста (`PROXY_HTTP_PORT=0`), чтобы деплой не падал из-за занятого `80`.
-Если нужен фиксированный порт, задайте его явно: `PROXY_HTTP_PORT=80` (или любой другой).
-
-Если `proxy` иногда зависает после предыдущих запусков, используйте автоматический скрипт (Windows PowerShell):
-
-```powershell
-./scripts/up.ps1
-```
-
-Скрипт сам удаляет контейнер `proxy` перед пересборкой и запускает стек с `--remove-orphans`.
-
-### 3) Доступ
-
-- UI: `http://<server-ip>/`
-- API health: `http://<server-ip>/api/health`
-
----
-
-## Домен и TLS
-
-Проект уже готов к доменному сценарию:
-
-- контейнер `proxy` публикует случайный свободный порт хоста по умолчанию (или фиксированный через `PROXY_HTTP_PORT`);
-- пользователь привязывает DNS домен к IP сервера;
-- SSL можно выпускать внешним способом (например, certbot) и монтировать сертификаты в `deploy/nginx/certs`.
-
-Webhook URL для YooKassa:
-
-```text
-https://your-domain.tld/webhook/<store_path>
-```
-
----
-
-## Настройка в веб-панели
-
-### 1) Мой Налог profile
-
-Создайте профиль и выберите режим:
-
-- `official_api`: через внешний официальный интеграционный endpoint
-- `unofficial_api`: через `access_token` и/или `cookie_blob`
-
-Если доступ протухнет, задачи автоматически переходят в `WAITING_AUTH` и не теряются.
-
-Дополнительно доступно в панели:
-
-- проверка действительности текущей сессии (`auth check`) через API `lknpd`;
-- вход по телефону в 2 шага: `SMS challenge` → подтверждение кода;
-- редактирование и удаление профилей;
-- расширенные auth-логи в отдельной вкладке `Логи` (включая `context`).
-- отдельная загрузка auth-логов по конкретному профилю (`Auth-логи` в таблице профилей).
-
-### 2) Магазин
-
-Для магазина задаются:
-
-- `webhook_path`
-- шаблон описания (`description_template`)
-- JSON path полей (`amount_path`, `payment_id_path`, `customer_name_path`)
-- режим ретрансляции (`relay_mode`)
-- `include_receipt_url_in_relay`
-- `auto_cancel_on_refund`
-
-### 3) Ретрансляция
-
-Можно добавить один или несколько target URL для каждого магазина.
-
-Режимы:
-
-- `fire_and_forget`: отправить и не ждать 200
-- `retry_until_200`: повторять до `relay_retry_limit`
-
-Опционально в relayed JSON добавляется поле:
-
-```json
-{
-	"generated_receipt_url": "https://..."
-}
-```
-
-### 4) Telegram
-
-Для каждого магазина можно назначить свои каналы и события:
-
-- `payment_received`
-- `refund_received`
-- `receipt_created`
-- `receipt_canceled`
-- `mytax_auth_required`
-- `mytax_auth_queue_waiting`
-- `mytax_auth_recovered`
-- `task_retry_scheduled`
-- `receipt_failed`
-
-Поддержка тем (topics): заполните `topic_id`.
-
-Также можно отредактировать канал после создания и отправить тестовое уведомление кнопкой `Тест`.
-
----
-
-## Обслуживание БД
-
-Во вкладке `Обслуживание` можно задать:
-
-- хранение в днях для `Логи`, `События`, `Очередь`, `Чеки`;
-- лимит «оставить последних N» для этих же сущностей;
-- интервал автоочистки (в минутах).
-
-Очистка запускается worker-ом автоматически по интервалу и может быть запущена вручную из UI кнопкой `Запустить очистку сейчас`.
-
----
-
-## Шаблоны и переменные
-
-Поддерживаются шаблоны вида `{{variable}}`.
-
-Базовые переменные:
-
-- `{{payment_id}}`
-- `{{amount}}`
-- `{{customer_name}}`
-- `{{event}}`
-- доступ к payload: `{{payload.object.id}}`
-
-Пример:
-
-```text
-Оплата заказа {{payment_id}} на сумму {{amount}} ₽
-```
-
----
-
-## Примеры webhook payload
-
-### Платёж
-
-```json
-{
-	"event": "payment.succeeded",
-	"object": {
-		"id": "2b7f-0001",
-		"amount": { "value": "1990.00", "currency": "RUB" },
-		"metadata": { "customer_name": "Иван" }
-	}
-}
-```
-
-### Возврат
-
-```json
-{
-	"event": "refund.succeeded",
-	"object": {
-		"id": "2b7f-0001",
-		"amount": { "value": "1990.00", "currency": "RUB" }
-	}
-}
-```
-
----
-
-## Аналитика и аудит
-
-Панель содержит вкладки:
-
-- `Обзор` (агрегированные метрики)
-- `События`
-- `Очередь`
-- `Чеки`
-- `Логи`
-
-Фильтры:
-
-- по магазину
-- по диапазону дат
-
----
-
-## API (основные endpoint’ы)
-
-- `GET /api/health`
-- `GET/POST/PUT/DELETE /api/stores`
-- `GET/POST/PUT /api/profiles`
-- `DELETE /api/profiles/{id}`
-- `POST /api/profiles/{id}/login`
-- `POST /api/profiles/{id}/auth/check`
-- `POST /api/profiles/{id}/auth/phone/start`
-- `POST /api/profiles/{id}/auth/phone/verify`
-- `GET /api/profiles/{id}/logs`
-- `GET/POST /api/relay-targets`
-- `GET/POST /api/telegram-channels`
-- `POST /api/webhook/{store_path}`
-- `GET /api/events`
-- `GET /api/queue`
-- `POST /api/queue/retry`
-- `GET /api/receipts`
-- `GET /api/logs`
-- `GET /api/stats`
-
----
-
-## Что проверено по интеграциям «Мой Налог»
-
-Проверены открытые проекты:
-
-- https://github.com/loolzaaa/mytax-client
-- https://github.com/shoman4eg/moy-nalog
-- https://github.com/byBenPuls/moy_nalog
-- https://github.com/TimNekk/nalog
-
-Вывод: в open-source чаще встречается неофициальная интеграция через auth/token/cookie и endpoint’ы `lknpd.nalog.ru`. Поэтому в системе реализован гибридный подход + обязательная очередь при auth-проблемах.
-
----
-
-## Ограничения текущей версии
-
-- `official_api` зависит от внешнего интеграционного endpoint (`PROXY_BASE_URL/mytax/...`).
-- неофициальный API может меняться со стороны сервиса; при изменениях может потребоваться адаптация endpoint’ов.
-
----
-
-## Безопасность
-
-- не храните открытые токены в git
-- используйте секреты/`env` на сервере
-- ограничьте доступ к панели reverse-proxy правилами (IP allowlist, basic auth, VPN)
-- при необходимости включите проверку IP источника webhook
-
----
 
 ## Лицензия
 
-MIT. См. [LICENSE](LICENSE).
+MIT, см. [LICENSE](LICENSE).

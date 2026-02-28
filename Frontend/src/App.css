@@ -82,6 +82,11 @@
   padding: 14px;
 }
 
+.auth-card {
+  max-width: 620px;
+  margin: 40px auto;
+}
+
 .form h2 {
   margin-top: 0;
   margin-bottom: 12px;

@@ -182,6 +182,16 @@ class LoginProfileIn(BaseModel):
     force: bool = False
 
 
+class PanelLoginIn(BaseModel):
+    login: str
+    password: str
+
+
+class PanelAuthStatusOut(BaseModel):
+    configured: bool
+    authenticated: bool
+
+
 class ProfilePhoneChallengeIn(BaseModel):
     phone: str | None = None
 

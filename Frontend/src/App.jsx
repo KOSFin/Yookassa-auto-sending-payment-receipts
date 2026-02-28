@@ -88,6 +88,7 @@ const emptyMaintenance = {
 
 async function api(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options,
   })
@@ -266,6 +267,12 @@ function App() {
   const [telegramForm, setTelegramForm] = useState(emptyTelegramForm)
   const [maintenanceSettings, setMaintenanceSettings] = useState(emptyMaintenance)
   const [lastCleanupResult, setLastCleanupResult] = useState(null)
+  const [authChecked, setAuthChecked] = useState(false)
+  const [authConfigured, setAuthConfigured] = useState(false)
+  const [authenticated, setAuthenticated] = useState(false)
+  const [authLoading, setAuthLoading] = useState(false)
+  const [authForm, setAuthForm] = useState({ login: '', password: '' })
+  const [authError, setAuthError] = useState('')
 
   const querySuffix = useMemo(() => {
     const params = new URLSearchParams()
@@ -391,9 +398,59 @@ function App() {
     }
   }
 
+  const refreshAuthStatus = async () => {
+    try {
+      const status = await api('/auth/status')
+      setAuthConfigured(Boolean(status.configured))
+      setAuthenticated(Boolean(status.authenticated))
+      setAuthError('')
+    } catch (err) {
+      setAuthConfigured(false)
+      setAuthenticated(false)
+      setAuthError(formatErrorMessage(err))
+    } finally {
+      setAuthChecked(true)
+    }
+  }
+
+  const loginPanel = async (event) => {
+    event.preventDefault()
+    setAuthLoading(true)
+    setAuthError('')
+    try {
+      await api('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify(authForm),
+      })
+      await refreshAuthStatus()
+      await loadAll({ force: true })
+      showToast('success', 'Вход выполнен')
+    } catch (err) {
+      setAuthError(formatErrorMessage(err))
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  const logoutPanel = async () => {
+    await runAction(
+      'panelLogout',
+      async () => {
+        await api('/auth/logout', { method: 'POST', body: '{}' })
+        setAuthenticated(false)
+      },
+      'Вы вышли из панели',
+    )
+  }
+
   useEffect(() => {
+    refreshAuthStatus()
+  }, [])
+
+  useEffect(() => {
+    if (!authChecked || !authConfigured || !authenticated) return
     loadAll()
-  }, [activeTab, querySuffix, logsQuerySuffix])
+  }, [authChecked, authConfigured, authenticated, activeTab, querySuffix, logsQuerySuffix])
 
   const saveStore = async (event) => {
     event.preventDefault()
@@ -841,6 +898,61 @@ function App() {
     ? safeJsonParse(relayTemplatePreviewRaw, { rendered_payload: relayTemplatePreviewRaw })
     : relaySamplePayload
 
+  if (!authChecked) {
+    return (
+      <div className="page">
+        <div className="card auth-card">
+          <h2>Проверка доступа</h2>
+          <p className="subtle">Проверяем настройки авторизации панели…</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!authConfigured) {
+    return (
+      <div className="page">
+        <div className="card auth-card">
+          <h2>Панель заблокирована</h2>
+          <p className="subtle">В backend не заданы обязательные переменные окружения: PANEL_LOGIN и PANEL_PASSWORD.</p>
+          <InlineError message={authError} />
+        </div>
+      </div>
+    )
+  }
+
+  if (!authenticated) {
+    return (
+      <div className="page">
+        <form className="form auth-card" onSubmit={loginPanel}>
+          <h2>Вход в панель</h2>
+          <p className="subtle">Введите логин и пароль из переменных окружения backend.</p>
+          <div className="grid cols-2">
+            <FloatingInput
+              label="Логин"
+              value={authForm.login}
+              onChange={(e) => setAuthForm((prev) => ({ ...prev, login: e.target.value }))}
+              autoComplete="username"
+              required
+            />
+            <FloatingInput
+              label="Пароль"
+              type="password"
+              value={authForm.password}
+              onChange={(e) => setAuthForm((prev) => ({ ...prev, password: e.target.value }))}
+              autoComplete="current-password"
+              required
+            />
+          </div>
+          <InlineError message={authError} />
+          <div className="actions-row">
+            <AsyncButton type="submit" loading={authLoading} idleText="Войти" loadingText="Проверка…" />
+          </div>
+        </form>
+      </div>
+    )
+  }
+
   return (
     <div className="page">
       <header className="topbar">
@@ -849,12 +961,20 @@ function App() {
           <p>Авто-чек в «Мой налог», очередь, ретрансляция вебхуков, Telegram-уведомления</p>
           <p className="subtle small">Данные в сессии кэшируются до перезагрузки страницы. Последнее обновление: {lastFetchedAt.stores ? new Date(lastFetchedAt.stores).toLocaleTimeString() : 'ещё не было'}</p>
         </div>
-        <AsyncButton
-          onClick={() => loadAll({ force: true })}
-          loading={loading}
-          idleText="Обновить"
-          loadingText="Обновление…"
-        />
+        <div className="actions-row">
+          <AsyncButton
+            onClick={() => loadAll({ force: true })}
+            loading={loading}
+            idleText="Обновить"
+            loadingText="Обновление…"
+          />
+          <AsyncButton
+            onClick={logoutPanel}
+            loading={actionLoading.panelLogout}
+            idleText="Выйти"
+            loadingText="Выход…"
+          />
+        </div>
       </header>
 
       <section className="filters">
