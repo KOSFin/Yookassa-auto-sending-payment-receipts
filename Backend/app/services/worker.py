@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 
 from sqlalchemy import delete, func, or_, select
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -150,7 +151,14 @@ async def process_cleanup_if_due(db: AsyncSession) -> None:
 
 async def process_one_task() -> None:
     async with AsyncSessionLocal() as db:
-        await process_cleanup_if_due(db)
+        try:
+            await process_cleanup_if_due(db)
+        except ProgrammingError as exc:
+            if 'maintenance_settings' in str(exc):
+                await db.rollback()
+                logger.warning('Skipping cleanup: maintenance_settings table is not available yet')
+            else:
+                raise
         query = (
             select(ReceiptTask)
             .where(
