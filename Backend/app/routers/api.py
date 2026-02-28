@@ -400,13 +400,7 @@ async def panel_auth_status(request: Request) -> PanelAuthStatusOut:
 async def panel_auth_login(payload: PanelLoginIn, response: Response) -> dict:
     if not is_panel_auth_configured():
         raise HTTPException(status_code=503, detail='Panel auth is not configured. Set PANEL_LOGIN and PANEL_PASSWORD.')
-    
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.warning(f"Auth attempt: login_len={len(payload.login)}, pass_len={len(payload.password)}, login_repr={repr(payload.login[:3])}...")
-    
     if not verify_credentials(payload.login, payload.password):
-        logger.error(f"Auth failed for login={repr(payload.login)}")
         raise HTTPException(status_code=401, detail='Invalid login or password')
 
     token = create_session_token(payload.login.strip())

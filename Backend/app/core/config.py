@@ -11,6 +11,11 @@ class Settings(BaseSettings):
     database_url: str = 'postgresql+asyncpg://postgres:postgres@postgres:5432/yookassa_auto'
     worker_poll_interval_seconds: int = 15
     run_embedded_worker: bool = False
+    
+    task_retry_base_seconds: int = 60
+    task_retry_max_seconds: int = 1800
+    task_retry_exponential_multiplier: int = 2
+    telegram_retry_notification_interval: int = 5
 
     panel_login: str = ''
     panel_password: str = ''

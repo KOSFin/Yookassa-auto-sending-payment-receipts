@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.db import AsyncSessionLocal
+from app.core.config import settings
 from app.models import (
     AppLog,
     EventStatus,
@@ -359,7 +360,10 @@ async def process_one_task() -> None:
         except MyTaxTransientError as exc:
             task.status = TaskStatus.PENDING
             task.attempts = max(0, task.attempts - 1)
-            retry_seconds = min(1800, 30 + task.attempts * 30)
+            retry_seconds = min(
+                settings.task_retry_max_seconds,
+                settings.task_retry_base_seconds * (settings.task_retry_exponential_multiplier ** max(0, task.attempts - 1)),
+            )
             task.next_retry_at = datetime.utcnow() + timedelta(seconds=retry_seconds)
             task.error_message = str(exc)
             payment_event.status = EventStatus.RECEIVED
@@ -383,15 +387,18 @@ async def process_one_task() -> None:
                 retry_seconds,
                 exc,
             )
-            await notify_store(
-                db,
-                store_id=task.store_id,
-                event_name='task_retry_scheduled',
-                message=(
-                    f'Временная ошибка Мой Налог для платежа {task.payment_id}. '
-                    f'Повтор через {retry_seconds} сек.'
-                ),
-            )
+            
+            should_notify = task.attempts == 0 or task.attempts % settings.telegram_retry_notification_interval == 0
+            if should_notify:
+                await notify_store(
+                    db,
+                    store_id=task.store_id,
+                    event_name='task_retry_scheduled',
+                    message=(
+                        f'Временная ошибка Мой Налог для платежа {task.payment_id} (попытка {task.attempts}). '
+                        f'Следующий повтор через {retry_seconds} сек.'
+                    ),
+                )
 
         except Exception as exc:
             if task.attempts >= task.max_attempts:
