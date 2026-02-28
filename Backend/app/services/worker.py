@@ -358,47 +358,76 @@ async def process_one_task() -> None:
             )
 
         except MyTaxTransientError as exc:
-            task.status = TaskStatus.PENDING
-            task.attempts = max(0, task.attempts - 1)
+            retry_base_seconds = max(1, settings.task_retry_base_seconds)
+            retry_max_seconds = max(retry_base_seconds, settings.task_retry_max_seconds)
+            retry_multiplier = max(1, settings.task_retry_exponential_multiplier)
+            notify_interval = max(1, settings.telegram_retry_notification_interval)
+
             retry_seconds = min(
-                settings.task_retry_max_seconds,
-                settings.task_retry_base_seconds * (settings.task_retry_exponential_multiplier ** max(0, task.attempts - 1)),
+                retry_max_seconds,
+                retry_base_seconds * (retry_multiplier ** max(0, task.attempts - 1)),
             )
-            task.next_retry_at = datetime.utcnow() + timedelta(seconds=retry_seconds)
+
+            if task.attempts >= task.max_attempts:
+                task.status = TaskStatus.FAILED
+                payment_event.status = EventStatus.FAILED
+            else:
+                task.status = TaskStatus.PENDING
+                payment_event.status = EventStatus.RECEIVED
+                task.next_retry_at = datetime.utcnow() + timedelta(seconds=retry_seconds)
+
             task.error_message = str(exc)
-            payment_event.status = EventStatus.RECEIVED
             payment_event.error_message = str(exc)
             await _create_worker_log(
                 db,
-                'worker_task_transient_retry',
-                f'Task #{task.id} transient MyTax error, retry scheduled: {exc}',
+                'worker_task_failed' if task.status == TaskStatus.FAILED else 'worker_task_transient_retry',
+                (
+                    f'Task #{task.id} reached max attempts after transient MyTax error: {exc}'
+                    if task.status == TaskStatus.FAILED
+                    else f'Task #{task.id} transient MyTax error, retry scheduled: {exc}'
+                ),
                 store_id=task.store_id,
-                level='warning',
+                level='error' if task.status == TaskStatus.FAILED else 'warning',
                 context={
                     'task_id': task.id,
                     'payment_id': task.payment_id,
                     'attempts': task.attempts,
+                    'max_attempts': task.max_attempts,
                     'retry_in_seconds': retry_seconds,
                 },
             )
-            logger.warning(
-                'Task %s transient MyTax error, retry in %s sec: %s',
-                task.id,
-                retry_seconds,
-                exc,
-            )
-            
-            should_notify = task.attempts == 0 or task.attempts % settings.telegram_retry_notification_interval == 0
-            if should_notify:
+            if task.status == TaskStatus.FAILED:
+                logger.error('Task %s failed after max transient retries: %s', task.id, exc)
                 await notify_store(
                     db,
                     store_id=task.store_id,
-                    event_name='task_retry_scheduled',
+                    event_name='receipt_failed',
                     message=(
-                        f'Временная ошибка Мой Налог для платежа {task.payment_id} (попытка {task.attempts}). '
-                        f'Следующий повтор через {retry_seconds} сек.'
+                        f'Не удалось обработать чек по платежу {task.payment_id}: {exc}. '
+                        'Превышен лимит попыток.'
                     ),
                 )
+            else:
+                logger.warning(
+                    'Task %s transient MyTax error, retry in %s sec (attempt %s/%s): %s',
+                    task.id,
+                    retry_seconds,
+                    task.attempts,
+                    task.max_attempts,
+                    exc,
+                )
+
+                should_notify = task.attempts == 1 or task.attempts % notify_interval == 0
+                if should_notify:
+                    await notify_store(
+                        db,
+                        store_id=task.store_id,
+                        event_name='task_retry_scheduled',
+                        message=(
+                            f'Временная ошибка Мой Налог для платежа {task.payment_id} (попытка {task.attempts}/{task.max_attempts}). '
+                            f'Следующий повтор через {retry_seconds} сек.'
+                        ),
+                    )
 
         except Exception as exc:
             if task.attempts >= task.max_attempts:
