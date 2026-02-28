@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     app_debug: bool = False
 
     database_url: str = 'postgresql+asyncpg://postgres:postgres@postgres:5432/yookassa_auto'
-    worker_poll_interval_seconds: int = 5
+    worker_poll_interval_seconds: int = 15
     run_embedded_worker: bool = False
 
     webhook_ip_validation: bool = False

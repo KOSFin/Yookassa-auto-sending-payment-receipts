@@ -903,9 +903,10 @@ async def list_logs(
     level: str | None = Query(default=None),
     event: str | None = Query(default=None),
     q: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=10, le=1000),
     db: AsyncSession = Depends(get_db),
 ) -> list[AppLog]:
-    query: Select[tuple[AppLog]] = select(AppLog).order_by(AppLog.id.desc()).limit(500)
+    query: Select[tuple[AppLog]] = select(AppLog).order_by(AppLog.id.desc()).limit(limit)
     if store_id is not None:
         query = query.where(AppLog.store_id == store_id)
     if level is not None:

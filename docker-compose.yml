@@ -29,7 +29,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-yookassa_auto}
       APP_ENV: ${APP_ENV:-production}
       APP_DEBUG: ${APP_DEBUG:-false}
-      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-5}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-15}
       PROXY_BASE_URL: ${PROXY_BASE_URL:-http://localhost}
       RUN_EMBEDDED_WORKER: ${RUN_EMBEDDED_WORKER:-false}
     depends_on:
@@ -37,10 +37,10 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
-      interval: 10s
+      interval: 30s
       timeout: 5s
-      retries: 10
-      start_period: 15s
+      retries: 5
+      start_period: 20s
 
   worker:
     build:
@@ -49,8 +49,8 @@ services:
     command: ["python", "-m", "app.worker_entry"]
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-yookassa_auto}
-      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-5}
-      RUN_EMBEDDED_WORKER: true
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-15}
+      RUN_EMBEDDED_WORKER: false
     depends_on:
       postgres:
         condition: service_healthy
@@ -64,10 +64,10 @@ services:
     networks:
       - appnet
     healthcheck:
-      test: ["CMD-SHELL", "nginx -t -q || exit 1"]
-      interval: 10s
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
       timeout: 5s
-      retries: 10
+      retries: 5
       start_period: 10s
 
   proxy:
@@ -80,16 +80,16 @@ services:
       - ./deploy/nginx/certs:/etc/nginx/certs:ro
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
       frontend:
-        condition: service_started
+        condition: service_healthy
     networks:
       - appnet
     healthcheck:
-      test: ["CMD-SHELL", "nginx -t -q || exit 1"]
-      interval: 10s
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/nginx-health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
       timeout: 5s
-      retries: 10
+      retries: 5
       start_period: 5s
 
 volumes:

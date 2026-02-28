@@ -257,37 +257,30 @@ function App() {
     setLoading(true)
     setGlobalError('')
     try {
-      const [
-        storesRes,
-        profilesRes,
-        relayRes,
-        telegramRes,
-        eventsRes,
-        queueRes,
-        receiptsRes,
-        logsRes,
-        statsRes,
-        maintenanceRes,
-      ] = await Promise.all([
+      const [storesRes, profilesRes, statsRes, maintenanceRes] = await Promise.all([
         api('/stores'),
         api('/profiles'),
-        api(`/relay-targets${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`),
-        api(`/telegram-channels${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`),
-        api(`/events${querySuffix}`),
-        api(`/queue${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`),
-        api(`/receipts${querySuffix}`),
-        api(`/logs${logsQuerySuffix}`),
         api(`/stats${querySuffix}`),
         api('/maintenance/settings'),
       ])
+
+      const [relayRes, telegramRes, eventsRes, queueRes, receiptsRes, logsRes] = await Promise.all([
+        activeTab === 'relay' ? api(`/relay-targets${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`) : Promise.resolve(null),
+        activeTab === 'telegram' ? api(`/telegram-channels${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`) : Promise.resolve(null),
+        activeTab === 'events' ? api(`/events${querySuffix}`) : Promise.resolve(null),
+        activeTab === 'queue' ? api(`/queue${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`) : Promise.resolve(null),
+        activeTab === 'receipts' ? api(`/receipts${querySuffix}`) : Promise.resolve(null),
+        activeTab === 'logs' ? api(`/logs${logsQuerySuffix}${logsQuerySuffix ? '&' : '?'}limit=200`) : Promise.resolve(null),
+      ])
+
       setStores(storesRes)
       setProfiles(profilesRes)
-      setRelayTargets(relayRes)
-      setTelegramChannels(telegramRes)
-      setEvents(eventsRes)
-      setQueue(queueRes)
-      setReceipts(receiptsRes)
-      setLogs(logsRes)
+      if (relayRes) setRelayTargets(relayRes)
+      if (telegramRes) setTelegramChannels(telegramRes)
+      if (eventsRes) setEvents(eventsRes)
+      if (queueRes) setQueue(queueRes)
+      if (receiptsRes) setReceipts(receiptsRes)
+      if (logsRes) setLogs(logsRes)
       setStats(statsRes)
       setMaintenanceSettings({
         log_retention_days: maintenanceRes.log_retention_days,
@@ -309,7 +302,7 @@ function App() {
 
   useEffect(() => {
     loadAll()
-  }, [querySuffix, selectedStoreId, logsQuerySuffix])
+  }, [activeTab, querySuffix, logsQuerySuffix])
 
   const createStore = async (event) => {
     event.preventDefault()

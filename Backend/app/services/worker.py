@@ -128,25 +128,28 @@ async def process_cleanup_if_due(db: AsyncSession) -> None:
     )
 
     settings.last_cleanup_at = now
-    await _create_worker_log(
-        db,
-        'maintenance_cleanup_done',
-        'Worker выполнил автоочистку БД',
-        context={
-            'deleted_logs': deleted_logs,
-            'deleted_events': deleted_events,
-            'deleted_queue': deleted_queue,
-            'deleted_receipts': deleted_receipts,
-            'interval_minutes': settings.cleanup_interval_minutes,
-        },
-    )
-    logger.info(
-        'Cleanup done: logs=%s events=%s queue=%s receipts=%s',
-        deleted_logs,
-        deleted_events,
-        deleted_queue,
-        deleted_receipts,
-    )
+    deleted_total = deleted_logs + deleted_events + deleted_queue + deleted_receipts
+    if deleted_total > 0:
+        await _create_worker_log(
+            db,
+            'maintenance_cleanup_done',
+            'Worker выполнил автоочистку БД',
+            context={
+                'deleted_logs': deleted_logs,
+                'deleted_events': deleted_events,
+                'deleted_queue': deleted_queue,
+                'deleted_receipts': deleted_receipts,
+                'interval_minutes': settings.cleanup_interval_minutes,
+            },
+        )
+        logger.info(
+            'Cleanup done: logs=%s events=%s queue=%s receipts=%s',
+            deleted_logs,
+            deleted_events,
+            deleted_queue,
+            deleted_receipts,
+        )
+    await db.commit()
 
 
 async def process_one_task() -> None:
