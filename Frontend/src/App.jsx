@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 const API_BASE = '/api'
@@ -140,6 +140,28 @@ function InlineError({ message }) {
   return <div className="inline-error">{message}</div>
 }
 
+function FloatingInput({ label, value, className = '', ...props }) {
+  const hasValue = String(value ?? '').length > 0
+  return (
+    <label className={`floating-field ${hasValue ? 'has-value' : ''} ${className}`}>
+      <input {...props} value={value} placeholder=" " />
+      <span>{label}</span>
+    </label>
+  )
+}
+
+function FloatingSelect({ label, value, children, className = '', ...props }) {
+  const hasValue = String(value ?? '').length > 0
+  return (
+    <label className={`floating-field ${hasValue ? 'has-value' : ''} ${className}`}>
+      <select {...props} value={value}>
+        {children}
+      </select>
+      <span>{label}</span>
+    </label>
+  )
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState('overview')
   const [stores, setStores] = useState([])
@@ -163,7 +185,10 @@ function App() {
   const [toast, setToast] = useState({ type: '', message: '' })
 
   const [editingProfileId, setEditingProfileId] = useState(null)
+  const [editingStoreId, setEditingStoreId] = useState(null)
   const [editingTelegramId, setEditingTelegramId] = useState(null)
+  const cacheRef = useRef({})
+  const [lastFetchedAt, setLastFetchedAt] = useState({})
 
   const [phoneAuthForm, setPhoneAuthForm] = useState({
     profile_id: '',
@@ -253,24 +278,58 @@ function App() {
     }
   }
 
-  const loadAll = async () => {
+  const fetchWithCache = async (key, fetcher, { force = false, ttlMs = 120000 } = {}) => {
+    const now = Date.now()
+    const entry = cacheRef.current[key]
+    if (!force && entry && now - entry.ts < ttlMs) {
+      return entry.data
+    }
+    const data = await fetcher()
+    cacheRef.current[key] = { data, ts: now }
+    setLastFetchedAt((prev) => ({ ...prev, [key]: now }))
+    return data
+  }
+
+  const invalidateCache = (prefixes = []) => {
+    const next = { ...cacheRef.current }
+    Object.keys(next).forEach((key) => {
+      if (prefixes.some((prefix) => key.startsWith(prefix))) {
+        delete next[key]
+      }
+    })
+    cacheRef.current = next
+  }
+
+  const loadAll = async ({ force = false } = {}) => {
     setLoading(true)
     setGlobalError('')
     try {
       const [storesRes, profilesRes, statsRes, maintenanceRes] = await Promise.all([
-        api('/stores'),
-        api('/profiles'),
-        api(`/stats${querySuffix}`),
-        api('/maintenance/settings'),
+        fetchWithCache('stores', () => api('/stores'), { force, ttlMs: 180000 }),
+        fetchWithCache('profiles', () => api('/profiles'), { force, ttlMs: 180000 }),
+        fetchWithCache(`stats:${querySuffix}`, () => api(`/stats${querySuffix}`), { force, ttlMs: 30000 }),
+        fetchWithCache('maintenance:settings', () => api('/maintenance/settings'), { force, ttlMs: 60000 }),
       ])
 
       const [relayRes, telegramRes, eventsRes, queueRes, receiptsRes, logsRes] = await Promise.all([
-        activeTab === 'relay' ? api(`/relay-targets${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`) : Promise.resolve(null),
-        activeTab === 'telegram' ? api(`/telegram-channels${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`) : Promise.resolve(null),
-        activeTab === 'events' ? api(`/events${querySuffix}`) : Promise.resolve(null),
-        activeTab === 'queue' ? api(`/queue${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`) : Promise.resolve(null),
-        activeTab === 'receipts' ? api(`/receipts${querySuffix}`) : Promise.resolve(null),
-        activeTab === 'logs' ? api(`/logs${logsQuerySuffix}${logsQuerySuffix ? '&' : '?'}limit=200`) : Promise.resolve(null),
+        activeTab === 'relay'
+          ? fetchWithCache(`relay:${selectedStoreId || 'all'}`, () => api(`/relay-targets${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`), { force, ttlMs: 60000 })
+          : Promise.resolve(null),
+        activeTab === 'telegram'
+          ? fetchWithCache(`telegram:${selectedStoreId || 'all'}`, () => api(`/telegram-channels${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`), { force, ttlMs: 60000 })
+          : Promise.resolve(null),
+        activeTab === 'events'
+          ? fetchWithCache(`events:${querySuffix}`, () => api(`/events${querySuffix}`), { force, ttlMs: 30000 })
+          : Promise.resolve(null),
+        activeTab === 'queue'
+          ? fetchWithCache(`queue:${selectedStoreId || 'all'}`, () => api(`/queue${selectedStoreId ? `?store_id=${selectedStoreId}` : ''}`), { force, ttlMs: 20000 })
+          : Promise.resolve(null),
+        activeTab === 'receipts'
+          ? fetchWithCache(`receipts:${querySuffix}`, () => api(`/receipts${querySuffix}`), { force, ttlMs: 30000 })
+          : Promise.resolve(null),
+        activeTab === 'logs'
+          ? fetchWithCache(`logs:${logsQuerySuffix}`, () => api(`/logs${logsQuerySuffix}${logsQuerySuffix ? '&' : '?'}limit=200`), { force, ttlMs: 30000 })
+          : Promise.resolve(null),
       ])
 
       setStores(storesRes)
@@ -304,24 +363,78 @@ function App() {
     loadAll()
   }, [activeTab, querySuffix, logsQuerySuffix])
 
-  const createStore = async (event) => {
+  const saveStore = async (event) => {
     event.preventDefault()
     await runAction(
       'storeForm',
       async () => {
-        await api('/stores', {
-          method: 'POST',
+        await api(editingStoreId ? `/stores/${editingStoreId}` : '/stores', {
+          method: editingStoreId ? 'PUT' : 'POST',
           body: JSON.stringify({
             ...storeForm,
             relay_retry_limit: Number(storeForm.relay_retry_limit),
             mytax_profile_id: storeForm.mytax_profile_id ? Number(storeForm.mytax_profile_id) : null,
           }),
         })
-        setStoreForm({ ...storeForm, name: '', webhook_path: '' })
-        await loadAll()
+        setStoreForm({
+          name: '',
+          webhook_path: '',
+          description_template: 'Оплата заказа {{payment_id}}',
+          item_name_template: 'Услуга {{payment_id}}',
+          amount_path: 'object.amount.value',
+          payment_id_path: 'object.id',
+          customer_name_path: 'object.metadata.customer_name',
+          relay_mode: 'retry_until_200',
+          relay_retry_limit: 5,
+          include_receipt_url_in_relay: true,
+          auto_cancel_on_refund: true,
+          is_active: true,
+          mytax_profile_id: null,
+        })
+        setEditingStoreId(null)
+        invalidateCache(['stores', 'stats:', 'relay:', 'events:', 'receipts:', 'queue:'])
+        await loadAll({ force: true })
       },
-      'Магазин сохранён',
+      editingStoreId ? 'Магазин обновлён' : 'Магазин сохранён',
     )
+  }
+
+  const startEditStore = (store) => {
+    setEditingStoreId(store.id)
+    setStoreForm({
+      name: store.name || '',
+      webhook_path: store.webhook_path || '',
+      description_template: store.description_template || 'Оплата заказа {{payment_id}}',
+      item_name_template: store.item_name_template || 'Услуга {{payment_id}}',
+      amount_path: store.amount_path || 'object.amount.value',
+      payment_id_path: store.payment_id_path || 'object.id',
+      customer_name_path: store.customer_name_path || 'object.metadata.customer_name',
+      relay_mode: store.relay_mode || 'retry_until_200',
+      relay_retry_limit: store.relay_retry_limit || 5,
+      include_receipt_url_in_relay: Boolean(store.include_receipt_url_in_relay),
+      auto_cancel_on_refund: Boolean(store.auto_cancel_on_refund),
+      is_active: Boolean(store.is_active),
+      mytax_profile_id: store.mytax_profile_id ?? null,
+    })
+  }
+
+  const cancelStoreEdit = () => {
+    setEditingStoreId(null)
+    setStoreForm({
+      name: '',
+      webhook_path: '',
+      description_template: 'Оплата заказа {{payment_id}}',
+      item_name_template: 'Услуга {{payment_id}}',
+      amount_path: 'object.amount.value',
+      payment_id_path: 'object.id',
+      customer_name_path: 'object.metadata.customer_name',
+      relay_mode: 'retry_until_200',
+      relay_retry_limit: 5,
+      include_receipt_url_in_relay: true,
+      auto_cancel_on_refund: true,
+      is_active: true,
+      mytax_profile_id: null,
+    })
   }
 
   const createProfile = async (event) => {
@@ -335,7 +448,8 @@ function App() {
         })
         setProfileForm(emptyProfileForm)
         setEditingProfileId(null)
-        await loadAll()
+        invalidateCache(['profiles', 'stats:'])
+        await loadAll({ force: true })
       },
       editingProfileId ? 'Профиль обновлён' : 'Профиль сохранён',
     )
@@ -349,7 +463,8 @@ function App() {
           method: 'POST',
           body: JSON.stringify({ force: true }),
         })
-        await loadAll()
+        invalidateCache(['profiles', 'stats:'])
+        await loadAll({ force: true })
       },
       'Проверка авторизации выполнена',
     )
@@ -363,7 +478,8 @@ function App() {
         if (!result.is_authenticated) {
           throw new Error(result.message || 'Проверка авторизации неуспешна')
         }
-        await loadAll()
+        invalidateCache(['profiles', 'stats:'])
+        await loadAll({ force: true })
       },
       'Сессия профиля активна',
     )
@@ -404,7 +520,8 @@ function App() {
           }),
         })
         setPhoneAuthForm({ profile_id: '', phone: '', challenge_token: '', code: '', expire_date: '' })
-        await loadAll()
+        invalidateCache(['profiles', 'stats:'])
+        await loadAll({ force: true })
       },
       'Телефонная авторизация подтверждена',
     )
@@ -439,7 +556,8 @@ function App() {
         if (String(phoneAuthForm.profile_id) === String(profileId)) {
           setPhoneAuthForm({ profile_id: '', phone: '', challenge_token: '', code: '', expire_date: '' })
         }
-        await loadAll()
+        invalidateCache(['relay:'])
+        await loadAll({ force: true })
       },
       'Профиль удалён',
     )
@@ -477,9 +595,32 @@ function App() {
           }),
         })
         setRelayForm({ ...relayForm, name: '', url: '' })
-        await loadAll()
+        invalidateCache(['telegram:'])
+        await loadAll({ force: true })
       },
       'Ретранслятор сохранён',
+    )
+  }
+
+  const toggleReceiptUrlForSelectedStore = async () => {
+    if (!relayForm.store_id) return
+    const selectedStore = stores.find((item) => String(item.id) === String(relayForm.store_id))
+    if (!selectedStore) return
+
+    await runAction(
+      'relayStoreSetting',
+      async () => {
+        await api(`/stores/${selectedStore.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            ...selectedStore,
+            include_receipt_url_in_relay: !selectedStore.include_receipt_url_in_relay,
+          }),
+        })
+        invalidateCache(['stores', 'relay:', 'events:', 'receipts:'])
+        await loadAll({ force: true })
+      },
+      'Настройка магазина обновлена',
     )
   }
 
@@ -531,7 +672,8 @@ function App() {
         })
         setTelegramForm(emptyTelegramForm)
         setEditingTelegramId(null)
-        await loadAll()
+        invalidateCache(['queue:', 'stats:'])
+        await loadAll({ force: true })
       },
       editingTelegramId ? 'Telegram-бот обновлён' : 'Telegram-бот создан',
     )
@@ -560,7 +702,8 @@ function App() {
           method: 'POST',
           body: JSON.stringify({ task_id: taskId }),
         })
-        await loadAll()
+        invalidateCache(['maintenance:settings', 'logs:'])
+        await loadAll({ force: true })
       },
       'Задача поставлена на повтор',
     )
@@ -597,7 +740,7 @@ function App() {
       async () => {
         const result = await api('/maintenance/cleanup', { method: 'POST', body: '{}' })
         setLastCleanupResult(result)
-        await loadAll()
+        await loadAll({ force: true })
       },
       'Очистка выполнена',
     )
@@ -609,9 +752,10 @@ function App() {
         <div>
           <h1>YooKassa Auto MyTax Relay</h1>
           <p>Авто-чек в «Мой налог», очередь, ретрансляция вебхуков, Telegram-уведомления</p>
+          <p className="subtle small">Данные в сессии кэшируются до перезагрузки страницы. Последнее обновление: {lastFetchedAt.stores ? new Date(lastFetchedAt.stores).toLocaleTimeString() : 'ещё не было'}</p>
         </div>
         <AsyncButton
-          onClick={loadAll}
+          onClick={() => loadAll({ force: true })}
           loading={loading}
           idleText="Обновить"
           loadingText="Обновление…"
@@ -667,66 +811,44 @@ function App() {
 
       {activeTab === 'stores' && (
         <section className="stack">
-          <form className="form" onSubmit={createStore}>
-            <h2>Добавить магазин</h2>
-            <p className="subtle">Параметры ниже управляют тем, как система извлекает данные из webhook и формирует текст чека.</p>
+          <form className="form" onSubmit={saveStore}>
+            <h2>{editingStoreId ? 'Редактировать магазин' : 'Добавить магазин'}</h2>
+            <p className="subtle">Ниже сначала простые настройки для бизнеса, а технические поля — в блоке «Продвинутые» с примерами.</p>
             <div className="grid cols-2">
-              <input placeholder="Название" value={storeForm.name} onChange={(e) => setStoreForm({ ...storeForm, name: e.target.value })} required />
-              <input placeholder="Webhook path (например shop-a)" value={storeForm.webhook_path} onChange={(e) => setStoreForm({ ...storeForm, webhook_path: e.target.value })} required />
+              <FloatingInput label="Название магазина" value={storeForm.name} onChange={(e) => setStoreForm({ ...storeForm, name: e.target.value })} required />
+              <FloatingInput label="Адрес webhook (например shop-a)" value={storeForm.webhook_path} onChange={(e) => setStoreForm({ ...storeForm, webhook_path: e.target.value })} required />
 
-              <label>
-                Режим ретрансляции
-                <select value={storeForm.relay_mode} onChange={(e) => setStoreForm({ ...storeForm, relay_mode: e.target.value })}>
-                  <option value="fire_and_forget">fire_and_forget</option>
-                  <option value="retry_until_200">retry_until_200</option>
-                </select>
-                <small>fire_and_forget — без ожидания 200; retry_until_200 — повтор до успеха.</small>
-              </label>
-
-              <label>
-                Лимит повторов ретрансляции
-                <input type="number" min="1" value={storeForm.relay_retry_limit} onChange={(e) => setStoreForm({ ...storeForm, relay_retry_limit: e.target.value })} />
-                <small>Сколько раз повторять отправку в режиме retry_until_200.</small>
-              </label>
-
-              <label>
-                Шаблон описания
-                <input placeholder="Например: Оплата заказа {{payment_id}}" value={storeForm.description_template} onChange={(e) => setStoreForm({ ...storeForm, description_template: e.target.value })} />
-                <small>Текст для описания чека. Можно использовать переменные ниже.</small>
-              </label>
-
-              <label>
-                Профиль Мой Налог
-                <select value={storeForm.mytax_profile_id ?? ''} onChange={(e) => setStoreForm({ ...storeForm, mytax_profile_id: e.target.value || null })}>
-                  <option value="">Без профиля</option>
-                  {profiles.map((profile) => (
-                    <option key={profile.id} value={profile.id}>{profile.name}</option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                amount_path
-                <input value={storeForm.amount_path} onChange={(e) => setStoreForm({ ...storeForm, amount_path: e.target.value })} />
-                <small>Путь к сумме в payload YooKassa (например object.amount.value).</small>
-              </label>
-              <label>
-                payment_id_path
-                <input value={storeForm.payment_id_path} onChange={(e) => setStoreForm({ ...storeForm, payment_id_path: e.target.value })} />
-                <small>Путь к ID платежа.</small>
-              </label>
-              <label>
-                customer_name_path
-                <input value={storeForm.customer_name_path} onChange={(e) => setStoreForm({ ...storeForm, customer_name_path: e.target.value })} />
-                <small>Путь к имени клиента (если есть в metadata).</small>
-              </label>
+              <FloatingInput label="Описание в чеке" value={storeForm.description_template} onChange={(e) => setStoreForm({ ...storeForm, description_template: e.target.value })} />
+              <FloatingSelect label="Профиль Мой Налог" value={storeForm.mytax_profile_id ?? ''} onChange={(e) => setStoreForm({ ...storeForm, mytax_profile_id: e.target.value || null })}>
+                <option value="">Без профиля</option>
+                {profiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>{profile.name}</option>
+                ))}
+              </FloatingSelect>
             </div>
 
+            <p className="subtle">Переменные для поля «Описание в чеке»:</p>
             <div className="variables-row">
               {templateVariables.map((item) => (
                 <span key={item.key} className="var-chip" title={item.hint}>{item.key}</span>
               ))}
             </div>
+
+            <details className="advanced-box">
+              <summary>Продвинутые настройки (для тех, кто хочет гибко настроить payload)</summary>
+              <div className="grid cols-2 top-gap">
+                <FloatingSelect label="Режим ретрансляции" value={storeForm.relay_mode} onChange={(e) => setStoreForm({ ...storeForm, relay_mode: e.target.value })}>
+                  <option value="fire_and_forget">Отправить без ожидания ответа</option>
+                  <option value="retry_until_200">Повторять до HTTP 200</option>
+                </FloatingSelect>
+                <FloatingInput label="Максимум повторов ретрансляции" type="number" min="1" value={storeForm.relay_retry_limit} onChange={(e) => setStoreForm({ ...storeForm, relay_retry_limit: e.target.value })} />
+
+                <FloatingInput label="Путь к сумме (JSON path)" value={storeForm.amount_path} onChange={(e) => setStoreForm({ ...storeForm, amount_path: e.target.value })} />
+                <FloatingInput label="Путь к ID платежа (JSON path)" value={storeForm.payment_id_path} onChange={(e) => setStoreForm({ ...storeForm, payment_id_path: e.target.value })} />
+                <FloatingInput label="Путь к имени клиента (JSON path)" value={storeForm.customer_name_path} onChange={(e) => setStoreForm({ ...storeForm, customer_name_path: e.target.value })} />
+              </div>
+              <p className="subtle">Примеры путей: <b>object.amount.value</b>, <b>object.id</b>, <b>object.metadata.customer_name</b>.</p>
+            </details>
 
             <label className="inline">
               <input type="checkbox" checked={storeForm.include_receipt_url_in_relay} onChange={(e) => setStoreForm({ ...storeForm, include_receipt_url_in_relay: e.target.checked })} />
@@ -738,12 +860,15 @@ function App() {
             </label>
 
             <InlineError message={inlineErrors.storeForm} />
-            <AsyncButton type="submit" loading={actionLoading.storeForm} idleText="Сохранить магазин" loadingText="Сохранение…" />
+            <div className="actions-row">
+              <AsyncButton type="submit" loading={actionLoading.storeForm} idleText={editingStoreId ? 'Сохранить изменения' : 'Сохранить магазин'} loadingText="Сохранение…" />
+              {editingStoreId ? <button type="button" onClick={cancelStoreEdit}>Отмена</button> : null}
+            </div>
           </form>
 
           <div className="table-wrap">
             <table>
-              <thead><tr><th>ID</th><th>Название</th><th>Webhook</th><th>Профиль</th><th>Режим relay</th><th>Активен</th></tr></thead>
+              <thead><tr><th>ID</th><th>Название</th><th>Webhook</th><th>Профиль</th><th>Режим relay</th><th>Активен</th><th>Действия</th></tr></thead>
               <tbody>
                 {stores.map((store) => (
                   <tr key={store.id}>
@@ -753,6 +878,7 @@ function App() {
                     <td>{store.mytax_profile_id || '-'}</td>
                     <td>{store.relay_mode}</td>
                     <td>{store.is_active ? 'Да' : 'Нет'}</td>
+                    <td><button onClick={() => startEditStore(store)}>Редактировать</button></td>
                   </tr>
                 ))}
               </tbody>
@@ -861,20 +987,44 @@ function App() {
           <form className="form" onSubmit={createRelayTarget}>
             <h2>Добавить ретранслятор</h2>
             <p className="subtle">
-              Ретранслятор копирует входящий webhook YooKassa на ваш URL. Если включен флажок добавления ссылки на чек,
-              в payload добавляются поля generated_receipt_url и generated_receipt_uuid после создания чека.
+              Ретранслятор пересылает webhook в вашу систему (CRM/бот/ERP). Можно отправлять как исходный webhook,
+              так и шаблонизированный payload с вашими полями.
             </p>
             <div className="grid cols-2">
-              <select value={relayForm.store_id} onChange={(e) => setRelayForm({ ...relayForm, store_id: e.target.value })} required>
+              <FloatingSelect label="Магазин" value={relayForm.store_id} onChange={(e) => setRelayForm({ ...relayForm, store_id: e.target.value })} required>
                 <option value="">Выбрать магазин</option>
                 {stores.map((store) => <option key={store.id} value={store.id}>{store.name}</option>)}
-              </select>
-              <input placeholder="Название" value={relayForm.name} onChange={(e) => setRelayForm({ ...relayForm, name: e.target.value })} required />
-              <input placeholder="URL" value={relayForm.url} onChange={(e) => setRelayForm({ ...relayForm, url: e.target.value })} required />
-              <input placeholder="Метод" value={relayForm.method} onChange={(e) => setRelayForm({ ...relayForm, method: e.target.value })} />
-              <input placeholder='Headers JSON, напр. {"Authorization":"Bearer ..."}' value={relayForm.headers_json} onChange={(e) => setRelayForm({ ...relayForm, headers_json: e.target.value })} />
-              <input placeholder='Шаблон payload, напр. {"payment":"{{object.id}}"}' value={relayForm.payload_template} onChange={(e) => setRelayForm({ ...relayForm, payload_template: e.target.value })} />
+              </FloatingSelect>
+              <FloatingInput label="Название ретранслятора" value={relayForm.name} onChange={(e) => setRelayForm({ ...relayForm, name: e.target.value })} required />
+              <FloatingInput label="URL получателя" value={relayForm.url} onChange={(e) => setRelayForm({ ...relayForm, url: e.target.value })} required />
+              <FloatingSelect label="HTTP метод" value={relayForm.method} onChange={(e) => setRelayForm({ ...relayForm, method: e.target.value })}>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+                <option value="GET">GET</option>
+                <option value="DELETE">DELETE</option>
+              </FloatingSelect>
+              <FloatingInput label="HTTP headers (JSON)" value={relayForm.headers_json} onChange={(e) => setRelayForm({ ...relayForm, headers_json: e.target.value })} />
+              <FloatingInput label="Шаблон payload (опционально)" value={relayForm.payload_template} onChange={(e) => setRelayForm({ ...relayForm, payload_template: e.target.value })} />
             </div>
+
+            {relayForm.store_id ? (
+              <div className="hint-block">
+                <strong>Ссылка на чек в ретрансляции</strong>
+                <p>
+                  Этот флажок задаётся в настройках магазина. Сейчас: <b>{stores.find((x) => String(x.id) === String(relayForm.store_id))?.include_receipt_url_in_relay ? 'включено' : 'выключено'}</b>.
+                  Если включено — в webhook добавятся поля <b>generated_receipt_url</b> и <b>generated_receipt_uuid</b>.
+                </p>
+                <AsyncButton
+                  type="button"
+                  onClick={toggleReceiptUrlForSelectedStore}
+                  loading={actionLoading.relayStoreSetting}
+                  idleText="Переключить флажок ссылки на чек"
+                  loadingText="Сохранение…"
+                />
+                <InlineError message={inlineErrors.relayStoreSetting} />
+              </div>
+            ) : null}
 
             <div className="example-block">
               <strong>Пример webhook YooKassa:</strong>

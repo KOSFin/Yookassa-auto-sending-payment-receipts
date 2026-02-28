@@ -139,6 +139,67 @@ button {
   font-size: 14px;
 }
 
+.subtle.small {
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.floating-field {
+  position: relative;
+  display: block;
+}
+
+.floating-field input,
+.floating-field select {
+  width: 100%;
+  padding-top: 18px;
+}
+
+.floating-field > span {
+  position: absolute;
+  left: 10px;
+  top: 12px;
+  font-size: 13px;
+  color: #6b7280;
+  transition: all 0.16s ease;
+  background: #fff;
+  padding: 0 4px;
+  pointer-events: none;
+}
+
+.floating-field input:focus + span,
+.floating-field input:not(:placeholder-shown) + span,
+.floating-field.has-value > span,
+.floating-field select:focus + span {
+  top: -8px;
+  font-size: 11px;
+  color: #1d4ed8;
+}
+
+.advanced-box {
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  padding: 10px;
+  margin: 8px 0 10px;
+}
+
+.advanced-box summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.top-gap {
+  margin-top: 10px;
+}
+
+.hint-block {
+  border: 1px solid #dbeafe;
+  background: #eff6ff;
+  border-radius: 8px;
+  padding: 10px;
+  margin: 8px 0;
+}
+
 .inline-error {
   border: 1px solid #fca5a5;
   background: #fef2f2;
