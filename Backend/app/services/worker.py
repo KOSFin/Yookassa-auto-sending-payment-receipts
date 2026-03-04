@@ -252,12 +252,30 @@ async def process_one_task() -> None:
                 )
                 db.add(receipt)
 
-                payment_event.relay_status = await relay_notification(
+                relay_status_before = payment_event.relay_status
+                receipt_relay_status = await relay_notification(
                     db,
                     store,
                     payment_event.payload,
                     receipt_result.receipt_url,
                     receipt_result.receipt_uuid,
+                    dispatch_stage='receipt',
+                )
+                if payment_event.relay_status == 'deferred_until_receipt' and receipt_relay_status != 'no_targets_for_phase':
+                    payment_event.relay_status = receipt_relay_status
+
+                await _create_worker_log(
+                    db,
+                    'worker_receipt_relay_done',
+                    f'Receipt relay processed for task #{task.id}',
+                    store_id=task.store_id,
+                    context={
+                        'task_id': task.id,
+                        'payment_id': task.payment_id,
+                        'relay_status_before': relay_status_before,
+                        'receipt_relay_status': receipt_relay_status,
+                        'receipt_uuid': receipt_result.receipt_uuid,
+                    },
                 )
 
                 await notify_store(

@@ -1194,7 +1194,7 @@ async def yookassa_webhook(store_path: str, payload: dict, request: Request, db:
     db.add(event)
     await db.flush()
 
-    event.relay_status = await relay_notification(db, store, payload)
+    event.relay_status = await relay_notification(db, store, payload, dispatch_stage='webhook')
 
     if event_name in {'payment.succeeded', 'payment.waiting_for_capture'}:
         task = ReceiptTask(
