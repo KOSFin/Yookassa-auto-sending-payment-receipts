@@ -69,23 +69,25 @@ async def _cleanup_by_rule(
     keep_last: int,
 ) -> int:
     deleted_total = 0
-    
-    try:
-        if retention_days > 0:
-            cutoff = datetime.utcnow() - timedelta(days=retention_days)
-            res = await db.execute(delete(model).where(datetime_column < cutoff))
-            deleted_total += int(res.rowcount or 0)
 
-        if keep_last > 0:
-            threshold_res = await db.execute(
-                select(id_column).order_by(id_column.desc()).offset(keep_last - 1).limit(1)
-            )
-            threshold_id = threshold_res.scalar_one_or_none()
-            if threshold_id is not None:
-                res = await db.execute(delete(model).where(id_column < threshold_id))
+    try:
+        # Keep cleanup failures local to a SAVEPOINT so we don't expire unrelated ORM objects
+        # in the outer transaction (which can lead to MissingGreenlet on later attribute access).
+        async with db.begin_nested():
+            if retention_days > 0:
+                cutoff = datetime.utcnow() - timedelta(days=retention_days)
+                res = await db.execute(delete(model).where(datetime_column < cutoff))
                 deleted_total += int(res.rowcount or 0)
+
+            if keep_last > 0:
+                threshold_res = await db.execute(
+                    select(id_column).order_by(id_column.desc()).offset(keep_last - 1).limit(1)
+                )
+                threshold_id = threshold_res.scalar_one_or_none()
+                if threshold_id is not None:
+                    res = await db.execute(delete(model).where(id_column < threshold_id))
+                    deleted_total += int(res.rowcount or 0)
     except IntegrityError:
-        await db.rollback()
         logger.warning(f"IntegrityError during cleanup of {model.__name__}. Some rows are pinned by foreign keys.")
         return deleted_total
 
