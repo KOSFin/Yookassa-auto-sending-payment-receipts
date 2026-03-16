@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta
 
 from sqlalchemy import delete, func, or_, select
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import ProgrammingError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -69,19 +69,25 @@ async def _cleanup_by_rule(
     keep_last: int,
 ) -> int:
     deleted_total = 0
-    if retention_days > 0:
-        cutoff = datetime.utcnow() - timedelta(days=retention_days)
-        res = await db.execute(delete(model).where(datetime_column < cutoff))
-        deleted_total += int(res.rowcount or 0)
-
-    if keep_last > 0:
-        threshold_res = await db.execute(
-            select(id_column).order_by(id_column.desc()).offset(keep_last - 1).limit(1)
-        )
-        threshold_id = threshold_res.scalar_one_or_none()
-        if threshold_id is not None:
-            res = await db.execute(delete(model).where(id_column < threshold_id))
+    
+    try:
+        if retention_days > 0:
+            cutoff = datetime.utcnow() - timedelta(days=retention_days)
+            res = await db.execute(delete(model).where(datetime_column < cutoff))
             deleted_total += int(res.rowcount or 0)
+
+        if keep_last > 0:
+            threshold_res = await db.execute(
+                select(id_column).order_by(id_column.desc()).offset(keep_last - 1).limit(1)
+            )
+            threshold_id = threshold_res.scalar_one_or_none()
+            if threshold_id is not None:
+                res = await db.execute(delete(model).where(id_column < threshold_id))
+                deleted_total += int(res.rowcount or 0)
+    except IntegrityError:
+        await db.rollback()
+        logger.warning(f"IntegrityError during cleanup of {model.__name__}. Some rows are pinned by foreign keys.")
+        return deleted_total
 
     return deleted_total
 
@@ -95,21 +101,13 @@ async def process_cleanup_if_due(db: AsyncSession) -> None:
         if delta_seconds < max(60, settings.cleanup_interval_minutes * 60):
             return
 
-    deleted_logs = await _cleanup_by_rule(
+    deleted_receipts = await _cleanup_by_rule(
         db,
-        AppLog,
-        AppLog.id,
-        AppLog.created_at,
-        settings.log_retention_days,
-        settings.keep_last_logs,
-    )
-    deleted_events = await _cleanup_by_rule(
-        db,
-        PaymentEvent,
-        PaymentEvent.id,
-        PaymentEvent.received_at,
-        settings.event_retention_days,
-        settings.keep_last_events,
+        Receipt,
+        Receipt.id,
+        Receipt.created_at,
+        settings.receipt_retention_days,
+        settings.keep_last_receipts,
     )
     deleted_queue = await _cleanup_by_rule(
         db,
@@ -119,13 +117,21 @@ async def process_cleanup_if_due(db: AsyncSession) -> None:
         settings.queue_retention_days,
         settings.keep_last_queue,
     )
-    deleted_receipts = await _cleanup_by_rule(
+    deleted_events = await _cleanup_by_rule(
         db,
-        Receipt,
-        Receipt.id,
-        Receipt.created_at,
-        settings.receipt_retention_days,
-        settings.keep_last_receipts,
+        PaymentEvent,
+        PaymentEvent.id,
+        PaymentEvent.received_at,
+        settings.event_retention_days,
+        settings.keep_last_events,
+    )
+    deleted_logs = await _cleanup_by_rule(
+        db,
+        AppLog,
+        AppLog.id,
+        AppLog.created_at,
+        settings.log_retention_days,
+        settings.keep_last_logs,
     )
 
     settings.last_cleanup_at = now
