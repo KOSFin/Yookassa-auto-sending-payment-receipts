@@ -1,4 +1,4 @@
-# YooKassa → Мой Налог Auto Relay
+# YooKassa (Юкасса) → Мой Налог Auto Relay
 
 ![Cover](https://capsule-render.vercel.app/api?type=waving&height=220&color=0:2563eb,100:7c3aed&text=YooKassa%20Auto%20MyTax%20Relay&fontAlign=50&fontAlignY=38&fontSize=38&fontColor=ffffff)
 
@@ -9,7 +9,7 @@
 ![Docker Compose](https://img.shields.io/badge/Docker%20Compose-Ready-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-Open-source система для самозанятых: получает webhook YooKassa, формирует/отзывает чеки в «Мой Налог», ретранслирует события во внешние endpoint’ы и отправляет Telegram-уведомления.
+Open-source система для самозанятых: получает webhook YooKassa (ЮКассы), формирует/отзывает чеки в «Мой Налог», ретранслирует события во внешние endpoint’ы и отправляет Telegram-уведомления.
 
 ## Быстрый старт
 
