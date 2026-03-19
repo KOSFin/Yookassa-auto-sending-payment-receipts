@@ -542,18 +542,42 @@ async def login_profile(profile_id: int, payload: LoginProfileIn, db: AsyncSessi
         if item.provider == 'unofficial_api':
             client = UnofficialMyTaxClient(item)
             has_token_or_cookie = bool(extract_access_token(item.access_token) or normalize_cookie_blob(item.cookie_blob))
+            has_inn_password = bool((item.inn or '').strip() and (item.password or '').strip())
 
             if has_token_or_cookie:
-                probe_user = await client.probe_auth()
-                item.is_authenticated = True
-                item.last_error = ''
-                item.last_auth_at = datetime.now(UTC).replace(tzinfo=None)
-                await _create_log(
-                    db,
-                    'mytax_auth_check_success',
-                    f'Профиль {item.name} авторизован по access_token/cookie',
-                    context={**_profile_auth_context(item), 'auth_method': 'token_or_cookie', 'user': probe_user},
-                )
+                try:
+                    probe_user = await client.probe_auth()
+                    item.is_authenticated = True
+                    item.last_error = ''
+                    item.last_auth_at = datetime.now(UTC).replace(tzinfo=None)
+                    await _create_log(
+                        db,
+                        'mytax_auth_check_success',
+                        f'Профиль {item.name} авторизован по access_token/cookie',
+                        context={**_profile_auth_context(item), 'auth_method': 'token_or_cookie', 'user': probe_user},
+                    )
+                except Exception as probe_exc:
+                    if not has_inn_password:
+                        raise
+                    token_payload = await client.login_with_inn_password()
+                    token_payload_json = json.dumps(token_payload, ensure_ascii=False)
+                    item.access_token = extract_access_token(token_payload_json)
+                    item.refresh_token = extract_refresh_token(token_payload_json, item.refresh_token)
+                    probe_user = await client.probe_auth()
+                    item.is_authenticated = True
+                    item.last_error = ''
+                    item.last_auth_at = datetime.now(UTC).replace(tzinfo=None)
+                    await _create_log(
+                        db,
+                        'mytax_auth_login_password_fallback_success',
+                        f'Профиль {item.name} переавторизован по ИНН/паролю после ошибки access_token/cookie',
+                        context={
+                            **_profile_auth_context(item),
+                            'auth_method': 'inn_password_fallback',
+                            'probe_error': str(probe_exc),
+                            'user': probe_user,
+                        },
+                    )
             elif item.inn and item.password:
                 token_payload = await client.login_with_inn_password()
                 item.access_token = extract_access_token(json.dumps(token_payload, ensure_ascii=False))

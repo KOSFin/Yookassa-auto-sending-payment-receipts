@@ -258,6 +258,27 @@ class MyTaxClient:
 class UnofficialMyTaxClient(MyTaxClient):
     base_url = 'https://lknpd.nalog.ru'
 
+    async def _try_reauthenticate(self) -> bool:
+        inn = (self.profile.inn or '').strip()
+        password = (self.profile.password or '').strip()
+        if not (inn and password):
+            return False
+
+        token_payload = await self.login_with_inn_password()
+        token_payload_json = json.dumps(token_payload, ensure_ascii=False)
+        access_token = extract_access_token(token_payload_json)
+        if not access_token:
+            raise MyTaxAuthError('Не удалось получить access_token при авто-переавторизации')
+
+        self.profile.access_token = access_token
+        refreshed_token = extract_refresh_token(token_payload_json, self.profile.refresh_token)
+        if refreshed_token:
+            self.profile.refresh_token = refreshed_token
+        self.profile.is_authenticated = True
+        self.profile.last_error = ''
+        self.profile.last_auth_at = datetime.utcnow()
+        return True
+
     def _build_receipt_url(self, receipt_uuid: str) -> str:
         normalized_inn = _normalize_inn(self.profile.inn)
         if normalized_inn and receipt_uuid:
@@ -412,7 +433,12 @@ class UnofficialMyTaxClient(MyTaxClient):
             'externalIncomeId': payment_id,
             'totalAmount': amount_value,
         }
-        response = await self._request('POST', f'{self.base_url}/api/v1/income', json_payload=payload, headers=self._headers())
+        try:
+            response = await self._request('POST', f'{self.base_url}/api/v1/income', json_payload=payload, headers=self._headers())
+        except MyTaxAuthError:
+            if not await self._try_reauthenticate():
+                raise
+            response = await self._request('POST', f'{self.base_url}/api/v1/income', json_payload=payload, headers=self._headers())
         if isinstance(response, dict):
             raw = response
         else:
@@ -425,7 +451,12 @@ class UnofficialMyTaxClient(MyTaxClient):
     async def cancel_receipt(self, receipt_uuid: str) -> dict:
         await self.ensure_authenticated()
         payload = {'receiptUuid': receipt_uuid}
-        return await self._request('POST', f'{self.base_url}/api/v1/cancel', json_payload=payload, headers=self._headers())
+        try:
+            return await self._request('POST', f'{self.base_url}/api/v1/cancel', json_payload=payload, headers=self._headers())
+        except MyTaxAuthError:
+            if not await self._try_reauthenticate():
+                raise
+            return await self._request('POST', f'{self.base_url}/api/v1/cancel', json_payload=payload, headers=self._headers())
 
 
 class OfficialMyTaxClient(MyTaxClient):
