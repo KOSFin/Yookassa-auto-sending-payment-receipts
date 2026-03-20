@@ -319,6 +319,30 @@ async def process_one_task() -> None:
                     message=f'Receipt canceled for payment {task.payment_id}',
                 )
 
+            reauth_method = str(getattr(client, 'last_reauth_method', '') or '').strip()
+            if reauth_method:
+                await _create_worker_log(
+                    db,
+                    'worker_auth_auto_recovered',
+                    f'Auto re-auth succeeded for task #{task.id}',
+                    store_id=task.store_id,
+                    level='info',
+                    context={
+                        'task_id': task.id,
+                        'payment_id': task.payment_id,
+                        'reauth_method': reauth_method,
+                    },
+                )
+                await notify_store(
+                    db,
+                    store_id=task.store_id,
+                    event_name='mytax_auth_auto_recovered',
+                    message=(
+                        'Сессия Мой Налог восстановлена автоматически. '
+                        f'Метод: {reauth_method}. Обработка платежа {task.payment_id} продолжена.'
+                    ),
+                )
+
             task.status = TaskStatus.SUCCESS
             task.error_message = ''
             payment_event.status = EventStatus.PROCESSED
@@ -364,7 +388,10 @@ async def process_one_task() -> None:
                         'profile_id': store.mytax_profile.id,
                         'provider': str(store.mytax_profile.provider),
                         'has_access_token': bool(store.mytax_profile.access_token),
+                        'has_refresh_token': bool((store.mytax_profile.refresh_token or '').strip()),
                         'has_cookie_blob': bool(store.mytax_profile.cookie_blob),
+                        'has_password': bool((store.mytax_profile.password or '').strip()),
+                        'device_id': store.mytax_profile.device_id or '',
                         'waiting_auth_tasks': waiting_count,
                     },
                 )
@@ -375,7 +402,10 @@ async def process_one_task() -> None:
                     event_name='mytax_auth_required',
                     message=(
                         f'Слетела авторизация Мой Налог: {exc}. '
-                        f'Задача по платежу {task.payment_id} переведена в ожидание и будет выполнена после входа.'
+                        f'Задача по платежу {task.payment_id} переведена в ожидание и будет выполнена после входа.\n'
+                        f'Диагностика: refresh_token={"yes" if (store.mytax_profile.refresh_token or "").strip() else "no"}, '
+                        f'пароль={"yes" if (store.mytax_profile.password or "").strip() else "no"}, '
+                        f'device_id={store.mytax_profile.device_id or "n/a"}.'
                     ),
                 )
 

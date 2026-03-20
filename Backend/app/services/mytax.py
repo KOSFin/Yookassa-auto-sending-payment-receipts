@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
+import logging
 from typing import Any
 from urllib.parse import unquote
 from uuid import uuid4
@@ -12,6 +13,9 @@ import httpx
 
 from app.core.config import settings
 from app.models import MyTaxProfile, MyTaxProvider
+
+
+logger = logging.getLogger(__name__)
 
 
 class MyTaxAuthError(Exception):
@@ -258,17 +262,15 @@ class MyTaxClient:
 class UnofficialMyTaxClient(MyTaxClient):
     base_url = 'https://lknpd.nalog.ru'
 
-    async def _try_reauthenticate(self) -> bool:
-        inn = (self.profile.inn or '').strip()
-        password = (self.profile.password or '').strip()
-        if not (inn and password):
-            return False
+    def __init__(self, profile: MyTaxProfile):
+        super().__init__(profile)
+        self.last_reauth_method: str = ''
 
-        token_payload = await self.login_with_inn_password()
+    def _apply_auth_payload(self, token_payload: dict[str, Any], *, reason: str) -> None:
         token_payload_json = json.dumps(token_payload, ensure_ascii=False)
         access_token = extract_access_token(token_payload_json)
         if not access_token:
-            raise MyTaxAuthError('Не удалось получить access_token при авто-переавторизации')
+            raise MyTaxAuthError('Не удалось получить access_token при переавторизации')
 
         self.profile.access_token = access_token
         refreshed_token = extract_refresh_token(token_payload_json, self.profile.refresh_token)
@@ -277,6 +279,48 @@ class UnofficialMyTaxClient(MyTaxClient):
         self.profile.is_authenticated = True
         self.profile.last_error = ''
         self.profile.last_auth_at = datetime.utcnow()
+        self.last_reauth_method = reason
+
+    async def refresh_access_token(self) -> dict[str, Any]:
+        refresh_token = (self.profile.refresh_token or '').strip()
+        if not refresh_token:
+            raise MyTaxAuthError('Отсутствует refresh_token для обновления сессии')
+
+        payload = {
+            'refreshToken': refresh_token,
+            'deviceInfo': self._device_info(),
+        }
+        token_payload = await self._request(
+            'POST',
+            f'{self.base_url}/api/v1/auth/token',
+            json_payload=payload,
+            headers={'Content-Type': 'application/json', 'Referrer': 'https://lknpd.nalog.ru/auth/login'},
+        )
+        if not isinstance(token_payload, dict):
+            raise MyTaxApiError('Не удалось обновить токен: неожиданный формат ответа')
+        self._apply_auth_payload(token_payload, reason='refresh_token')
+        return token_payload
+
+    async def _try_reauthenticate(self) -> bool:
+        self.last_reauth_method = ''
+
+        refresh_token = (self.profile.refresh_token or '').strip()
+        if refresh_token:
+            try:
+                await self.refresh_access_token()
+                logger.info('Auto re-auth succeeded via refresh token (profile_id=%s)', self.profile.id)
+                return True
+            except Exception as exc:
+                logger.warning('Auto re-auth via refresh token failed (profile_id=%s): %s', self.profile.id, exc)
+
+        inn = (self.profile.inn or '').strip()
+        password = (self.profile.password or '').strip()
+        if not (inn and password):
+            return False
+
+        token_payload = await self.login_with_inn_password()
+        self._apply_auth_payload(token_payload, reason='inn_password')
+        logger.info('Auto re-auth succeeded via INN/password (profile_id=%s)', self.profile.id)
         return True
 
     def _build_receipt_url(self, receipt_uuid: str) -> str:
@@ -408,7 +452,7 @@ class UnofficialMyTaxClient(MyTaxClient):
         payment_id: str,
         event_payload: dict[str, Any] | None = None,
     ) -> MyTaxReceiptResult:
-        await self.ensure_authenticated()
+        self.last_reauth_method = ''
         operation_time = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
         payment_type = _resolve_income_payment_type(event_payload)
         amount_value = _normalize_amount_string(amount)
@@ -434,6 +478,7 @@ class UnofficialMyTaxClient(MyTaxClient):
             'totalAmount': amount_value,
         }
         try:
+            await self.ensure_authenticated()
             response = await self._request('POST', f'{self.base_url}/api/v1/income', json_payload=payload, headers=self._headers())
         except MyTaxAuthError:
             if not await self._try_reauthenticate():
@@ -449,9 +494,10 @@ class UnofficialMyTaxClient(MyTaxClient):
         return MyTaxReceiptResult(receipt_uuid=receipt_uuid, receipt_url=receipt_url, raw=raw)
 
     async def cancel_receipt(self, receipt_uuid: str) -> dict:
-        await self.ensure_authenticated()
+        self.last_reauth_method = ''
         payload = {'receiptUuid': receipt_uuid}
         try:
+            await self.ensure_authenticated()
             return await self._request('POST', f'{self.base_url}/api/v1/cancel', json_payload=payload, headers=self._headers())
         except MyTaxAuthError:
             if not await self._try_reauthenticate():
