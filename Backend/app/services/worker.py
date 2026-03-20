@@ -4,7 +4,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import ProgrammingError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -174,7 +174,7 @@ async def process_one_task() -> None:
         query = (
             select(ReceiptTask)
             .where(
-                or_(ReceiptTask.status == TaskStatus.PENDING, ReceiptTask.status == TaskStatus.WAITING_AUTH),
+                ReceiptTask.status == TaskStatus.PENDING,
                 ReceiptTask.next_retry_at <= datetime.utcnow(),
             )
             .order_by(ReceiptTask.created_at.asc())
@@ -334,6 +334,12 @@ async def process_one_task() -> None:
             logger.info('Task %s completed successfully', task.id)
 
         except MyTaxAuthError as exc:
+            waiting_before_q = select(func.count(ReceiptTask.id)).where(
+                ReceiptTask.store_id == task.store_id,
+                ReceiptTask.status == TaskStatus.WAITING_AUTH,
+            )
+            waiting_before = int((await db.execute(waiting_before_q)).scalar() or 0)
+
             task.status = TaskStatus.WAITING_AUTH
             task.error_message = str(exc)
             task.next_retry_at = datetime.utcnow() + timedelta(minutes=15)
@@ -341,47 +347,55 @@ async def process_one_task() -> None:
             payment_event.error_message = str(exc)
             store.mytax_profile.is_authenticated = False
             store.mytax_profile.last_error = str(exc)
-            await _create_worker_log(
-                db,
-                'worker_auth_required',
-                f'Task #{task.id} requires MyTax re-authentication',
-                store_id=task.store_id,
-                level='warning',
-                context={
-                    'task_id': task.id,
-                    'payment_id': task.payment_id,
-                    'error': str(exc),
-                    'profile_id': store.mytax_profile.id,
-                    'provider': str(store.mytax_profile.provider),
-                    'has_access_token': bool(store.mytax_profile.access_token),
-                    'has_cookie_blob': bool(store.mytax_profile.cookie_blob),
-                },
-            )
-            logger.warning('Task %s moved to waiting_auth: %s', task.id, exc)
-            await notify_store(
-                db,
-                store_id=task.store_id,
-                event_name='mytax_auth_required',
-                message=(
-                    f'Слетела авторизация Мой Налог: {exc}. '
-                    f'Задача по платежу {task.payment_id} переведена в ожидание и будет выполнена после входа.'
-                ),
-            )
+            waiting_count = waiting_before + 1
 
-            waiting_count_q = select(func.count(ReceiptTask.id)).where(
-                ReceiptTask.store_id == task.store_id,
-                ReceiptTask.status == TaskStatus.WAITING_AUTH,
-            )
-            waiting_count = int((await db.execute(waiting_count_q)).scalar() or 0)
-            await notify_store(
-                db,
-                store_id=task.store_id,
-                event_name='mytax_auth_queue_waiting',
-                message=(
-                    'Чеки поставлены в очередь до повторной авторизации. '
-                    f'Сейчас в ожидании: {waiting_count}.'
-                ),
-            )
+            # Notify once when auth drops, then keep queue silently waiting until login restores access.
+            if waiting_before == 0:
+                await _create_worker_log(
+                    db,
+                    'worker_auth_required',
+                    f'Task #{task.id} requires MyTax re-authentication',
+                    store_id=task.store_id,
+                    level='warning',
+                    context={
+                        'task_id': task.id,
+                        'payment_id': task.payment_id,
+                        'error': str(exc),
+                        'profile_id': store.mytax_profile.id,
+                        'provider': str(store.mytax_profile.provider),
+                        'has_access_token': bool(store.mytax_profile.access_token),
+                        'has_cookie_blob': bool(store.mytax_profile.cookie_blob),
+                        'waiting_auth_tasks': waiting_count,
+                    },
+                )
+                logger.warning('Task %s moved to waiting_auth: %s', task.id, exc)
+                await notify_store(
+                    db,
+                    store_id=task.store_id,
+                    event_name='mytax_auth_required',
+                    message=(
+                        f'Слетела авторизация Мой Налог: {exc}. '
+                        f'Задача по платежу {task.payment_id} переведена в ожидание и будет выполнена после входа.'
+                    ),
+                )
+
+                await notify_store(
+                    db,
+                    store_id=task.store_id,
+                    event_name='mytax_auth_queue_waiting',
+                    message=(
+                        'Чеки поставлены в очередь до повторной авторизации. '
+                        f'Сейчас в ожидании: {waiting_count}.'
+                    ),
+                )
+            else:
+                logger.info(
+                    'Task %s moved to waiting_auth silently (store_id=%s, waiting=%s): %s',
+                    task.id,
+                    task.store_id,
+                    waiting_count,
+                    exc,
+                )
 
         except MyTaxTransientError as exc:
             retry_base_seconds = max(1, settings.task_retry_base_seconds)
