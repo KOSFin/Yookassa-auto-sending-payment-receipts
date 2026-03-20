@@ -1281,20 +1281,40 @@ async def yookassa_webhook(store_path: str, payload: dict, request: Request, db:
             .limit(1)
         )
         receipt = (await db.execute(receipt_q)).scalar_one_or_none()
-        task = ReceiptTask(
-            store_id=store.id,
-            event_id=event.id,
-            payment_id=payment_id,
-            task_type=TaskType.CANCEL_RECEIPT,
-            payload={'receipt_uuid': receipt.receipt_uuid if receipt else ''},
-        )
-        db.add(task)
-        await notify_store(
-            db,
-            store_id=store.id,
-            event_name='refund_received',
-            message=f'Получено уведомление на возврат {payment_id} ({event_name})',
-        )
+        receipt_uuid = (receipt.receipt_uuid if receipt else '') or ''
+        if receipt_uuid.strip():
+            task = ReceiptTask(
+                store_id=store.id,
+                event_id=event.id,
+                payment_id=payment_id,
+                task_type=TaskType.CANCEL_RECEIPT,
+                payload={'receipt_uuid': receipt_uuid.strip()},
+            )
+            db.add(task)
+            await notify_store(
+                db,
+                store_id=store.id,
+                event_name='refund_received',
+                message=f'Получено уведомление на возврат {payment_id} ({event_name})',
+            )
+        else:
+            await _create_log(
+                db,
+                'webhook_cancel_skipped_no_receipt',
+                f'Пропущена постановка cancel task: чек не найден для платежа {payment_id}',
+                store_id=store.id,
+                level='warning',
+                context={'payment_id': payment_id, 'event_name': event_name, 'event_id': event.id},
+            )
+            await notify_store(
+                db,
+                store_id=store.id,
+                event_name='refund_received_without_receipt',
+                message=(
+                    f'Получено уведомление {event_name} по платежу {payment_id}, '
+                    'но локальный чек не найден. Задача отмены не создана.'
+                ),
+            )
 
     await _create_log(
         db,
