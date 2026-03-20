@@ -235,6 +235,66 @@ async def process_one_task() -> None:
             )
 
             if task.task_type == TaskType.CREATE_RECEIPT:
+                context = build_context(payment_event.payload, store)
+                description = render_template(store.description_template, context)
+                amount_raw = context.get('amount', 0)
+                amount = float(amount_raw or 0)
+
+                receipt_result = await client.create_receipt(
+                    description=description,
+                    amount=amount,
+                    payment_id=task.payment_id,
+                    event_payload=payment_event.payload,
+                )
+                receipt = Receipt(
+                    store_id=store.id,
+                    task_id=task.id,
+                    payment_id=task.payment_id,
+                    receipt_uuid=receipt_result.receipt_uuid,
+                    receipt_url=receipt_result.receipt_url,
+                    amount=amount,
+                    currency='RUB',
+                    description=description,
+                    status=ReceiptStatus.CREATED,
+                    raw_response=receipt_result.raw,
+                )
+                db.add(receipt)
+
+                relay_status_before = payment_event.relay_status
+                receipt_relay_status = await relay_notification(
+                    db,
+                    store,
+                    payment_event.payload,
+                    receipt_result.receipt_url,
+                    receipt_result.receipt_uuid,
+                    dispatch_stage='receipt',
+                )
+                if payment_event.relay_status == 'deferred_until_receipt' and receipt_relay_status != 'no_targets_for_phase':
+                    payment_event.relay_status = receipt_relay_status
+
+                await _create_worker_log(
+                    db,
+                    'worker_receipt_relay_done',
+                    f'Receipt relay processed for task #{task.id}',
+                    store_id=task.store_id,
+                    context={
+                        'task_id': task.id,
+                        'payment_id': task.payment_id,
+                        'relay_status_before': relay_status_before,
+                        'receipt_relay_status': receipt_relay_status,
+                        'receipt_uuid': receipt_result.receipt_uuid,
+                    },
+                )
+
+                await notify_store(
+                    db,
+                    store_id=store.id,
+                    event_name='receipt_created',
+                    message=f'Receipt created for payment {task.payment_id}',
+                    receipt_url=receipt_result.receipt_url,
+                )
+
+            elif task.task_type == TaskType.CANCEL_RECEIPT:
                 receipt_uuid = str(task.payload.get('receipt_uuid', '') or '').strip()
 
                 receipt_query = (
@@ -286,67 +346,6 @@ async def process_one_task() -> None:
                         event_name='receipt_canceled',
                         message=f'Receipt canceled for payment {task.payment_id}',
                     )
-                )
-                db.add(receipt)
-
-                relay_status_before = payment_event.relay_status
-                receipt_relay_status = await relay_notification(
-                    db,
-                    store,
-                    payment_event.payload,
-                    receipt_result.receipt_url,
-                    receipt_result.receipt_uuid,
-                    dispatch_stage='receipt',
-                )
-                if payment_event.relay_status == 'deferred_until_receipt' and receipt_relay_status != 'no_targets_for_phase':
-                    payment_event.relay_status = receipt_relay_status
-
-                await _create_worker_log(
-                    db,
-                    'worker_receipt_relay_done',
-                    f'Receipt relay processed for task #{task.id}',
-                    store_id=task.store_id,
-                    context={
-                        'task_id': task.id,
-                        'payment_id': task.payment_id,
-                        'relay_status_before': relay_status_before,
-                        'receipt_relay_status': receipt_relay_status,
-                        'receipt_uuid': receipt_result.receipt_uuid,
-                    },
-                )
-
-                await notify_store(
-                    db,
-                    store_id=store.id,
-                    event_name='receipt_created',
-                    message=f'Receipt created for payment {task.payment_id}',
-                    receipt_url=receipt_result.receipt_url,
-                )
-
-            elif task.task_type == TaskType.CANCEL_RECEIPT:
-                receipt_uuid = task.payload.get('receipt_uuid', '')
-                if not receipt_uuid:
-                    raise ValueError('receipt_uuid is required for cancel task')
-                await client.cancel_receipt(receipt_uuid)
-
-                receipt_query = (
-                    select(Receipt)
-                    .where(Receipt.store_id == store.id, Receipt.payment_id == task.payment_id)
-                    .order_by(Receipt.created_at.desc())
-                    .limit(1)
-                )
-                receipt_res = await db.execute(receipt_query)
-                receipt = receipt_res.scalar_one_or_none()
-                if receipt is not None:
-                    receipt.status = ReceiptStatus.CANCELED
-                    receipt.canceled_at = datetime.utcnow()
-
-                await notify_store(
-                    db,
-                    store_id=store.id,
-                    event_name='receipt_canceled',
-                    message=f'Receipt canceled for payment {task.payment_id}',
-                )
 
             reauth_method = str(getattr(client, 'last_reauth_method', '') or '').strip()
             if reauth_method:
