@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -14,6 +15,27 @@ from app.services.panel_auth import is_panel_auth_configured, verify_session_tok
 from app.services.worker import worker_loop
 
 logger = logging.getLogger(__name__)
+
+
+class _HealthcheckAccessFilter(logging.Filter):
+    _ok_health_pattern = re.compile(r'"(?:GET|HEAD) /api/health [^"]*" 200\b')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if '/api/health' not in message:
+            return True
+        return self._ok_health_pattern.search(message) is None
+
+
+def _configure_access_log_filters() -> None:
+    access_logger = logging.getLogger('uvicorn.access')
+    if getattr(access_logger, '_health_filter_configured', False):
+        return
+    access_logger.addFilter(_HealthcheckAccessFilter())
+    setattr(access_logger, '_health_filter_configured', True)
+
+
+_configure_access_log_filters()
 
 app = FastAPI(title=settings.app_name)
 
