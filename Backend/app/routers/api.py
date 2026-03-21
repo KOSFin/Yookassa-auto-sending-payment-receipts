@@ -1258,20 +1258,45 @@ async def yookassa_webhook(store_path: str, payload: dict, request: Request, db:
     event.relay_status = await relay_notification(db, store, payload, dispatch_stage='webhook')
 
     if event_name in {'payment.succeeded', 'payment.waiting_for_capture'}:
-        task = ReceiptTask(
-            store_id=store.id,
-            event_id=event.id,
-            payment_id=payment_id,
-            task_type=TaskType.CREATE_RECEIPT,
-            payload=payload,
-        )
-        db.add(task)
-        await notify_store(
-            db,
-            store_id=store.id,
-            event_name='payment_received',
-            message=f'Получен платеж {payment_id} ({event_name})',
-        )
+        existing_task_id = (await db.execute(
+            select(ReceiptTask.id).where(
+                ReceiptTask.store_id == store.id,
+                ReceiptTask.payment_id == payment_id,
+                ReceiptTask.task_type == TaskType.CREATE_RECEIPT
+            ).limit(1)
+        )).scalar_one_or_none()
+
+        existing_receipt_id = (await db.execute(
+            select(Receipt.id).where(
+                Receipt.store_id == store.id,
+                Receipt.payment_id == payment_id
+            ).limit(1)
+        )).scalar_one_or_none()
+
+        if existing_task_id or existing_receipt_id:
+            await _create_log(
+                db,
+                'webhook_create_skipped',
+                f'Пропущено создание чека: уже есть задача или чек для платежа {payment_id}',
+                store_id=store.id,
+                level='info',
+                context={'payment_id': payment_id, 'event_name': event_name, 'event_id': event.id},
+            )
+        else:
+            task = ReceiptTask(
+                store_id=store.id,
+                event_id=event.id,
+                payment_id=payment_id,
+                task_type=TaskType.CREATE_RECEIPT,
+                payload=payload,
+            )
+            db.add(task)
+            await notify_store(
+                db,
+                store_id=store.id,
+                event_name='payment_received',
+                message=f'Получен платеж {payment_id} ({event_name})',
+            )
 
     if event_name in {'refund.succeeded', 'payment.canceled'} and store.auto_cancel_on_refund:
         receipt_q = (

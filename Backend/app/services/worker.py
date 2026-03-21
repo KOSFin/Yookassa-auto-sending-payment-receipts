@@ -178,6 +178,7 @@ async def process_one_task() -> None:
                 ReceiptTask.next_retry_at <= datetime.utcnow(),
             )
             .order_by(ReceiptTask.created_at.asc())
+            .with_for_update(skip_locked=True)
             .limit(1)
         )
         result = await db.execute(query)
@@ -235,6 +236,21 @@ async def process_one_task() -> None:
             )
 
             if task.task_type == TaskType.CREATE_RECEIPT:
+                stmt_existing_receipt = select(Receipt).where(
+                    Receipt.store_id == task.store_id,
+                    Receipt.payment_id == task.payment_id,
+                )
+                existing_receipt = await db.scalar(stmt_existing_receipt)
+                if existing_receipt:
+                    logger.info(f"Task #{task.id} skipped: Receipt for payment_id={task.payment_id} already exists (Receipt ID: {existing_receipt.id})")
+                    task.status = TaskStatus.SUCCESS
+                    task.error_message = f"Duplicate task: Receipt {existing_receipt.id} exists."
+                    payment_event.status = EventStatus.PROCESSED
+                    payment_event.processed_at = datetime.utcnow()
+                    db.add(task)
+                    await db.commit()
+                    return
+
                 context = build_context(payment_event.payload, store)
                 description = render_template(store.description_template, context)
                 amount_raw = context.get('amount', 0)
