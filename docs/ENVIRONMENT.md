@@ -22,6 +22,12 @@
 
 - `WORKER_POLL_INTERVAL_SECONDS` (integer, обычно 10-30).
 - `RUN_EMBEDDED_WORKER` (`true/false`).
+- `RECEIPT_TIMEZONE` — часовой пояс для `operationTime/requestTime` при регистрации чека в Мой Налог.
+
+Поддерживаемые форматы `RECEIPT_TIMEZONE`:
+1. `UTC`;
+2. Смещение: `+05:00`, `-03:30`, `+0500`, `+05`;
+3. IANA-таймзона: `Asia/Yekaterinburg`, `Europe/Moscow`.
 
 ## Anti-fraud
 

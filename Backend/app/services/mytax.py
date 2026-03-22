@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
 import logging
+import re
 from typing import Any
 from urllib.parse import unquote
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -16,6 +18,8 @@ from app.models import MyTaxProfile, MyTaxProvider
 
 
 logger = logging.getLogger(__name__)
+
+_TZ_OFFSET_RE = re.compile(r'^(?P<sign>[+-])(?P<hours>\d{1,2})(?::?(?P<minutes>\d{2}))?$')
 
 
 class MyTaxAuthError(Exception):
@@ -186,6 +190,38 @@ def _normalize_inn(value: str | None) -> str:
     if len(digits) == 12:
         return digits
     return ''
+
+
+def _resolve_receipt_timezone(raw_value: str | None) -> tzinfo:
+    value = (raw_value or '').strip()
+    if not value:
+        return timezone.utc
+
+    upper = value.upper()
+    if upper in {'UTC', 'Z'}:
+        return timezone.utc
+
+    match = _TZ_OFFSET_RE.match(value)
+    if match:
+        hours = int(match.group('hours'))
+        minutes_raw = match.group('minutes')
+        minutes = int(minutes_raw) if minutes_raw else 0
+        if hours <= 23 and minutes <= 59:
+            total_minutes = hours * 60 + minutes
+            if match.group('sign') == '-':
+                total_minutes = -total_minutes
+            return timezone(timedelta(minutes=total_minutes))
+
+    try:
+        return ZoneInfo(value)
+    except ZoneInfoNotFoundError:
+        logger.warning('Unknown RECEIPT_TIMEZONE=%r; using UTC', value)
+        return timezone.utc
+
+
+def _mytax_operation_time() -> str:
+    tz = _resolve_receipt_timezone(settings.receipt_timezone)
+    return datetime.now(tz).isoformat(timespec='seconds')
 
 
 class MyTaxClient:
@@ -453,7 +489,7 @@ class UnofficialMyTaxClient(MyTaxClient):
         event_payload: dict[str, Any] | None = None,
     ) -> MyTaxReceiptResult:
         self.last_reauth_method = ''
-        operation_time = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+        operation_time = _mytax_operation_time()
         payment_type = _resolve_income_payment_type(event_payload)
         amount_value = _normalize_amount_string(amount)
         payload = {

@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     database_url: str = 'postgresql+asyncpg://postgres:postgres@postgres:5432/yookassa_auto'
     worker_poll_interval_seconds: int = 15
     run_embedded_worker: bool = False
+    receipt_timezone: str = 'UTC'
     
     task_retry_base_seconds: int = 60
     task_retry_max_seconds: int = 1800
