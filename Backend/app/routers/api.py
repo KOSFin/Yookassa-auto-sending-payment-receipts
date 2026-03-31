@@ -7,7 +7,7 @@ import re
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from sqlalchemy import Select, and_, delete, func, select
+from sqlalchemy import Select, and_, delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -319,12 +319,16 @@ async def _delete_by_time_and_limit(
     datetime_column,
     retention_days: int,
     keep_last: int,
+    where_extra=None,
 ) -> int:
     deleted_total = 0
 
     if retention_days > 0:
         cutoff = datetime.utcnow() - timedelta(days=retention_days)
-        res = await db.execute(delete(model).where(datetime_column < cutoff))
+        stmt = delete(model).where(datetime_column < cutoff)
+        if where_extra is not None:
+            stmt = stmt.where(where_extra)
+        res = await db.execute(stmt)
         deleted_total += int(res.rowcount or 0)
 
     if keep_last > 0:
@@ -333,28 +337,24 @@ async def _delete_by_time_and_limit(
         )
         threshold_id = threshold_res.scalar_one_or_none()
         if threshold_id is not None:
-            res = await db.execute(delete(model).where(id_column < threshold_id))
+            stmt = delete(model).where(id_column < threshold_id)
+            if where_extra is not None:
+                stmt = stmt.where(where_extra)
+            res = await db.execute(stmt)
             deleted_total += int(res.rowcount or 0)
 
     return deleted_total
 
 
 async def _run_cleanup(db: AsyncSession, settings: MaintenanceSettings) -> MaintenanceCleanupOut:
-    deleted_logs = await _delete_by_time_and_limit(
+    # Delete in FK dependency order: receipts → receipt_tasks → payment_events → logs
+    deleted_receipts = await _delete_by_time_and_limit(
         db,
-        AppLog,
-        AppLog.id,
-        AppLog.created_at,
-        settings.log_retention_days,
-        settings.keep_last_logs,
-    )
-    deleted_events = await _delete_by_time_and_limit(
-        db,
-        PaymentEvent,
-        PaymentEvent.id,
-        PaymentEvent.received_at,
-        settings.event_retention_days,
-        settings.keep_last_events,
+        Receipt,
+        Receipt.id,
+        Receipt.created_at,
+        settings.receipt_retention_days,
+        settings.keep_last_receipts,
     )
     deleted_queue = await _delete_by_time_and_limit(
         db,
@@ -363,14 +363,24 @@ async def _run_cleanup(db: AsyncSession, settings: MaintenanceSettings) -> Maint
         ReceiptTask.created_at,
         settings.queue_retention_days,
         settings.keep_last_queue,
+        where_extra=~exists(select(Receipt.id).where(Receipt.task_id == ReceiptTask.id)),
     )
-    deleted_receipts = await _delete_by_time_and_limit(
+    deleted_events = await _delete_by_time_and_limit(
         db,
-        Receipt,
-        Receipt.id,
-        Receipt.created_at,
-        settings.receipt_retention_days,
-        settings.keep_last_receipts,
+        PaymentEvent,
+        PaymentEvent.id,
+        PaymentEvent.received_at,
+        settings.event_retention_days,
+        settings.keep_last_events,
+        where_extra=~exists(select(ReceiptTask.id).where(ReceiptTask.event_id == PaymentEvent.id)),
+    )
+    deleted_logs = await _delete_by_time_and_limit(
+        db,
+        AppLog,
+        AppLog.id,
+        AppLog.created_at,
+        settings.log_retention_days,
+        settings.keep_last_logs,
     )
     settings.last_cleanup_at = datetime.utcnow()
     await db.flush()
