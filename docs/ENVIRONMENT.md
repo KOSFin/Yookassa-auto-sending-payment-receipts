@@ -39,6 +39,14 @@
 1. Проверка IP источника webhook;
 2. Проверка статуса объекта через YooKassa API.
 
+## Telegram
+
+- `TELEGRAM_PROXY_URL` — глобальный прокси для всех Telegram API запросов (опционально).
+  Примеры:
+  - `http://proxy.example.com:8080`
+  - `http://user:pass@proxy.example.com:8080`
+  - `socks5://proxy.example.com:1080`
+
 ## Legacy
 
 - `WEBHOOK_IP_VALIDATION` — legacy совместимость. Используйте `WEBHOOK_ANTIFRAUD_ENABLED`.

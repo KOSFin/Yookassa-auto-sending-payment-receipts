@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     yookassa_shop_id: str = ''
     yookassa_secret_key: str = ''
     proxy_base_url: str = ''
+    telegram_proxy_url: str = ''
 
 
 settings = Settings()

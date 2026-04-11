@@ -4,6 +4,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models import TelegramChannel
 
 
@@ -21,7 +22,11 @@ async def send_telegram_message(
     if topic_id:
         payload['message_thread_id'] = topic_id
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    client_kwargs = {'timeout': 15}
+    if settings.telegram_proxy_url:
+        client_kwargs['proxies'] = settings.telegram_proxy_url
+    
+    async with httpx.AsyncClient(**client_kwargs) as client:
         response = await client.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', json=payload)
         response.raise_for_status()
 
