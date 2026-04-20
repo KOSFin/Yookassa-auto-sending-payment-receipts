@@ -70,7 +70,7 @@ from app.services.mytax import (
     normalize_cookie_blob,
 )
 from app.services.relay import relay_notification
-from app.services.telegram import notify_store, send_telegram_message
+from app.services.telegram import TelegramDeliveryError, notify_store, send_telegram_message
 from app.services.template import get_nested
 
 router = APIRouter()
@@ -1012,12 +1012,15 @@ async def test_telegram_channel(
     if item is None:
         raise HTTPException(status_code=404, detail='Telegram channel not found')
 
-    await send_telegram_message(
-        bot_token=item.bot_token,
-        chat_id=item.chat_id,
-        text=payload.text,
-        topic_id=item.topic_id,
-    )
+    try:
+        await send_telegram_message(
+            bot_token=item.bot_token,
+            chat_id=item.chat_id,
+            text=payload.text,
+            topic_id=item.topic_id,
+        )
+    except TelegramDeliveryError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     await _create_log(
         db,
         'telegram_channel_test_sent',
