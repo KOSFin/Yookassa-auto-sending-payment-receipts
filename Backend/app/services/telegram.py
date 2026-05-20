@@ -46,6 +46,8 @@ async def send_telegram_message(
         raise TelegramDeliveryError(f'Telegram API вернул HTTP {exc.response.status_code}.') from exc
     except httpx.HTTPError as exc:
         raise TelegramDeliveryError(f'Ошибка запроса к Telegram API: {exc.__class__.__name__}.') from exc
+    except Exception as exc:
+        raise TelegramDeliveryError(f'Неожиданная ошибка отправки Telegram: {exc.__class__.__name__}.') from exc
 
 
 async def notify_store(
@@ -79,4 +81,11 @@ async def notify_store(
                 channel.id,
                 event_name,
                 exc,
+            )
+        except Exception:
+            logger.exception(
+                'Unexpected Telegram notification failure ignored (store_id=%s, channel_id=%s, event=%s)',
+                store_id,
+                channel.id,
+                event_name,
             )
